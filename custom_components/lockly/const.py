@@ -57,6 +57,12 @@ LIVE_INIT_REARM_SECONDS = 1800
 # a door does not give up on it.
 SENDDATA_RETRY_DELAY_SECONDS = 3
 
+# Hubs whose id starts with this are Matter hubs, and the only ones present on
+# the MQTT device channel. BluetoothBean.isMatterHub() is exactly this prefix
+# test, and it gates the app's own hub-signal screen. Older Secure LINK hubs
+# (PGH200, PGH220) use the senddata REST relay instead.
+MATTER_HUB_PREFIX = "PGH260"
+
 SERVICE_LIST_GUESTS  = "list_guests"
 SERVICE_ADD_GUEST    = "add_guest"
 SERVICE_DELETE_GUEST = "delete_guest"

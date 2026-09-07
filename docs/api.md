@@ -1056,6 +1056,94 @@ It remains interesting for a different reason: `PGD728FG25` **is** on that list,
 so this is a plausible transport for the hub-less WiFi-native locks that cannot
 use `senddata` at all.
 
+
+### Hub generations use different transports
+
+This is the single most useful thing to know before debugging a lock that will
+not respond, and it took a long time to see.
+
+| Hub | Transport | Notes |
+|---|---|---|
+| `PGH200`, `PGH220` — Secure LINK | `senddata` REST relay | **Not present on the MQTT device channel.** The broker answers `3005 device is offline` for every device behind one. |
+| `PGH260` — Matter | MQTT broker | Lock commands travel as `lockCommandRequest`. `senddata` may return `cod=930` for these, because the locks are not REST-relay devices. |
+
+`BluetoothBean.isMatterHub()` is the app's own test, and it is a single string
+comparison:
+
+```java
+public boolean isMatterHub() {
+    if (TextUtils.isEmpty(this.hubId)) return false;
+    return DeviceManager.m57303j0(this.hubId);   // hubId.startsWith("PGH260")
+}
+```
+
+Both decompiled apps carry the identical check.
+
+That explains a report pattern which otherwise looks like a broken account: a
+user whose every `senddata` call returns `cod=930` while the official app
+controls their locks normally has a `PGH260`, and the app is using the broker.
+It is not a binding problem, it is the wrong transport for that hub generation.
+
+### `deviceInfoRequest` — radio diagnostics, PGH260 only
+
+Returns a device's radio and firmware detail:
+
+```json
+{"deviceId": "...",
+ "bluetooth": {"address": "...", "rssi": -72,
+               "rssiLastTimestamp": 0, "currentTimestamp": 0},
+ "wifi":      {"address": "...", "rssi": -58, "ssid": "..."},
+ "version":   {"firemwareVersion": "..."}}
+```
+
+Note Lockly's own typo in `firemwareVersion`.
+
+Built by `DeviceInfoController.fetchDeviceInfo(deviceId, hubId, callback)`:
+
+```java
+RequestData.create(queueId = hubId,               // client-side ordering only
+                   payload  = {deviceId},          // the only field on the wire
+                   tag      = "deviceInfoRequest",
+                   responseTypes = [DEVICE_INFO])
+```
+
+`queueId` never reaches the broker — it serialises requests per device inside
+`RequestManager` — so the published envelope carries only `deviceId`.
+
+**It powers exactly one feature, and it is Matter-only.** Every consumer lives
+under `ui/activity/matter/`: `HubConnectionDetectionActivity`,
+`HubConnectionDetectionViewModel.connectionDetection`, and the outcome screens
+`DetectionFragment`, `DetectionWeakFragment` and `DetectionLostFragment`. The
+menu entry that launches it is hidden unless `isMatterHub()`:
+
+```java
+if (bluetoothBean == null || !bluetoothBean.isMatterHub()) {
+    UIUtil.m87872G(8, this.f70524v2, ...);   // GONE
+}
+```
+
+`DetectionHubInfo` carries the thresholds the app rates signal against:
+
+| Constant | Value |
+|---|---|
+| `BLE_RSSI_STRONG_THRESHOLD` | `-70` |
+| `BLE_RSSI_WEAK_THRESHOLD` | `-80` |
+| `BLE_SIGNAL_EXPIRED_TIME` | `15000` ms |
+
+A reading whose `rssiLastTimestamp` is more than 15 seconds behind
+`currentTimestamp` is expired and should not be presented as current.
+
+Verified against a live account: a `PGH220` returns `3005 device is offline` for
+this request, whether asked about a lock id or its own hub id. That is correct
+behaviour rather than a fault — the feature does not apply to that hub
+generation. `lockly.read_signal` therefore refuses up front on any hub whose id
+does not start with `PGH260`, rather than issuing a request that cannot succeed.
+
+**There is no signal figure available for Secure LINK hubs by any route.**
+Nothing in the lock list carries one, and this is the only endpoint that
+reports one. Diagnosing a marginal lock on a `PGH220` means counting `cod=942`
+and `cod=408` failures per lock instead.
+
 ### Message format
 
 ```json

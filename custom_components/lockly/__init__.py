@@ -51,6 +51,7 @@ from .const import (
     HISTORY_LOOKBACK_DAYS,
     LIVE_INIT_MAX_ATTEMPTS,
     LIVE_INIT_REARM_SECONDS,
+    MATTER_HUB_PREFIX,
     SCAN_INTERVAL_SECONDS,
     SENDDATA_RETRY_DELAY_SECONDS,
     SERVICE_ADD_GUEST,
@@ -604,6 +605,20 @@ class LocklyCoordinator(DataUpdateCoordinator):
         mqtt = getattr(self, "_mqtt_manager", None)
         lock_id = lock["ID"]
         name = lock.get("na") or lock.get("blename") or lock_id
+        hub_id = str(lock.get("hubid") or "")
+        # The app gates its own "hub connection detection" screen on
+        # BluetoothBean.isMatterHub(), which is just hubId.startsWith("PGH260").
+        # Older Secure LINK hubs are not on the MQTT device channel at all and
+        # the broker answers 3005 for them, so say why instead of reporting a
+        # generic no-answer that invites retrying.
+        if not hub_id.startswith(MATTER_HUB_PREFIX):
+            _LOGGER.warning(
+                "Lockly: no signal reading for %s — its hub %s is not a %s "
+                "model. Signal strength comes from the Matter hub detection "
+                "feature, which older Secure LINK hubs do not support",
+                name, hub_id or "(none)", MATTER_HUB_PREFIX,
+            )
+            return None
         if mqtt is None or not mqtt.connected:
             _LOGGER.warning(
                 "Lockly: cannot read signal for %s — no MQTT connection", name
