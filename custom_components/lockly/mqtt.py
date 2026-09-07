@@ -195,7 +195,7 @@ class LocklyMQTTManager:
                         self._hass.async_create_task,
                         self._process_device_state(data),
                     )
-                elif name in ("lockCommandResponse", "exception"):
+                elif name in ("lockCommandResponse", "deviceInfoResponse", "exception"):
                     header = data.get("header") or {}
                     payload = data.get("payload") or {}
                     if name == "exception":
@@ -309,6 +309,91 @@ class LocklyMQTTManager:
         await self.async_stop()
         await self.async_start()
 
+    async def _exchange(
+        self, header_name: str, payload: dict, device_id: str, timeout: float
+    ) -> dict | None:
+        """Publish one request and wait for the reply carrying our requestId.
+
+        Shared by every request/response the broker serves. Returns the reply's
+        payload, or None if the publish failed locally or nothing answered.
+        """
+        client = self._client
+        if client is None or not self._connected:
+            _LOGGER.debug(
+                "Lockly MQTT: not connected, cannot send %s for %s",
+                header_name, device_id,
+            )
+            return None
+
+        request_id = str(uuid.uuid4())
+        future: asyncio.Future = self._hass.loop.create_future()
+        self._pending[request_id] = future
+        envelope = {
+            "header": {
+                "namespace": "com.lockly",
+                "name": header_name,
+                "requestId": request_id,
+                "timestamp": int(time.time() * 1000),
+            },
+            "payload": payload,
+        }
+        try:
+            info = await self._hass.async_add_executor_job(
+                lambda: client.publish(
+                    _PUBLISH_TOPIC, json.dumps(envelope, separators=(",", ":")), qos=1
+                )
+            )
+            if getattr(info, "rc", 1) != 0:
+                _LOGGER.warning(
+                    "Lockly MQTT: publish failed locally for %s (rc=%s)",
+                    device_id, getattr(info, "rc", "?"),
+                )
+                return None
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "Lockly MQTT: no reply within %.0fs for %s (%s)",
+                timeout, device_id, header_name,
+            )
+            return None
+        except Exception:  # noqa: BLE001 - a failure here must not break a command
+            _LOGGER.exception("Lockly MQTT: exchange failed for %s", device_id)
+            return None
+        finally:
+            self._pending.pop(request_id, None)
+
+    async def async_device_info(
+        self, device_id: str, timeout: float = _RESPONSE_TIMEOUT
+    ) -> dict | None:
+        """Ask the broker for a device's radio and firmware details.
+
+        Returns the `deviceInfoResponse` payload:
+
+            {"deviceId": ..., "bluetooth": {"address", "rssi",
+             "rssiLastTimestamp", "currentTimestamp"},
+             "wifi": {"address", "rssi", "ssid"},
+             "version": {"firemwareVersion"}}
+
+        `bluetooth.rssi` is the hub-to-lock signal, which is the only way to
+        measure why a particular lock keeps timing out rather than infer it from
+        where the hub is sitting. The app treats a reading whose
+        `rssiLastTimestamp` is more than 15 seconds behind `currentTimestamp` as
+        expired, so freshness has to be checked rather than assumed.
+        """
+        payload = await self._exchange(
+            "deviceInfoRequest", {"deviceId": device_id}, device_id, timeout
+        )
+        if payload is None:
+            return None
+        code = payload.get("code")
+        if code not in (0, "0", None):
+            _LOGGER.warning(
+                "Lockly MQTT: device info refused for %s — code=%s %s",
+                device_id, code, payload.get("errorMessage") or payload.get("message"),
+            )
+            return None
+        return payload
+
     async def async_exchange_frame(
         self, device_id: str, frame_hex: str, timeout: float = _RESPONSE_TIMEOUT
     ) -> str | None:
@@ -333,49 +418,20 @@ class LocklyMQTTManager:
             )
             return None
 
-        request_id = str(uuid.uuid4())
-        loop = self._hass.loop
-        future: asyncio.Future = loop.create_future()
-        self._pending[request_id] = future
-
-        envelope = {
-            "header": {
-                "namespace": "com.lockly",
-                "name": "lockCommandRequest",
-                "requestId": request_id,
-                "timestamp": int(time.time() * 1000),
-            },
-            "payload": {
+        payload = await self._exchange(
+            "lockCommandRequest",
+            {
                 "deviceId": device_id,
                 # "forward" is LockCommandRequestData.COMMAND_NAME: the server
                 # forwards the frame to the lock rather than interpreting it.
                 "commandName": "forward",
                 "commandContent": base64.b64encode(bytes.fromhex(frame_hex)).decode(),
             },
-        }
-        try:
-            info = await self._hass.async_add_executor_job(
-                lambda: client.publish(
-                    _PUBLISH_TOPIC, json.dumps(envelope, separators=(",", ":")), qos=1
-                )
-            )
-            if getattr(info, "rc", 1) != 0:
-                _LOGGER.warning(
-                    "Lockly MQTT: publish failed locally for %s (rc=%s)",
-                    device_id, getattr(info, "rc", "?"),
-                )
-                return None
-            payload = await asyncio.wait_for(future, timeout)
-        except asyncio.TimeoutError:
-            _LOGGER.warning(
-                "Lockly MQTT: no reply within %.0fs for %s", timeout, device_id
-            )
+            device_id,
+            timeout,
+        )
+        if payload is None:
             return None
-        except Exception:  # noqa: BLE001 - an exchange failure must not break a command
-            _LOGGER.exception("Lockly MQTT: exchange failed for %s", device_id)
-            return None
-        finally:
-            self._pending.pop(request_id, None)
 
         # code 0 means the *server* delivered it. The lock's own verdict is
         # inside commandContent, so this is not success on its own — reporting

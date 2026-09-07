@@ -60,6 +60,17 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _rate_rssi(rssi: int | None) -> str:
+    """Lockly's own wording for a signal level (DetectionHubInfo thresholds)."""
+    if rssi is None:
+        return "unknown"
+    if rssi >= -70:
+        return "strong"
+    if rssi >= -80:
+        return "fair"
+    return "weak"
+
 PLATFORMS = ["binary_sensor", "lock", "sensor"]
 
 
@@ -145,6 +156,8 @@ class LocklyCoordinator(DataUpdateCoordinator):
         # Locks observed reporting a CLOSED door circuit, which only a fitted
         # sensor can produce.  Used to gate the door sensor entity.
         self._door_sensor_proven: set[str] = set()
+        # Lock ID -> last radio reading from a deviceInfoRequest, on demand only.
+        self._signal: dict[str, dict] = {}
         # MQTT push configuration from getHeartbeatTime.  The broker authorises
         # subscriptions by client identity, and client_id is the only one the
         # API exposes; None means we never got it and fall back to defaults.
@@ -575,6 +588,68 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._set_optimistic_lock_state(lock["ID"], is_locked=not unlock)
         return True
 
+    async def async_read_signal(self, lock: dict) -> dict | None:
+        """Read a lock's radio details over MQTT and publish them.
+
+        `bluetooth.rssi` is the hub-to-lock signal strength. It is the one
+        measurement that distinguishes a lock that keeps timing out because of
+        its radio path from one failing for any other reason, and it cannot be
+        inferred from the lock list — nothing in that payload carries a signal
+        level.
+
+        Fetched on demand rather than polled. It is a broker round trip, and the
+        reading is only meaningful next to a physical change such as moving the
+        hub, so a background poll would add traffic for nothing.
+        """
+        mqtt = getattr(self, "_mqtt_manager", None)
+        lock_id = lock["ID"]
+        name = lock.get("na") or lock.get("blename") or lock_id
+        if mqtt is None or not mqtt.connected:
+            _LOGGER.warning(
+                "Lockly: cannot read signal for %s — no MQTT connection", name
+            )
+            return None
+
+        info = await mqtt.async_device_info(lock_id)
+        if not info:
+            # Expected on hubs that are not on the MQTT channel: they answer
+            # 3005 "device is offline", already logged by the manager.
+            _LOGGER.warning(
+                "Lockly: no signal data for %s — the hub did not answer over MQTT",
+                name,
+            )
+            return None
+
+        ble = info.get("bluetooth") or {}
+        wifi = info.get("wifi") or {}
+        # The app treats a reading older than 15s as expired, so report age
+        # rather than presenting a stale number as current.
+        last, now = ble.get("rssiLastTimestamp") or 0, ble.get("currentTimestamp") or 0
+        age = (now - last) / 1000 if now and last else None
+        data = {
+            "lock_id": lock_id,
+            "name": name,
+            "ble_rssi": ble.get("rssi"),
+            "ble_rssi_age_s": age,
+            "ble_rssi_stale": bool(age is not None and age > 15),
+            "hub_wifi_rssi": wifi.get("rssi"),
+            "hub_wifi_ssid": wifi.get("ssid"),
+            "hub_firmware": (info.get("version") or {}).get("firemwareVersion"),
+        }
+        _LOGGER.info(
+            "Lockly signal %s: ble_rssi=%s dBm (%s%s) hub_wifi=%s dBm ssid=%s",
+            name, data["ble_rssi"], _rate_rssi(data["ble_rssi"]),
+            ", STALE" if data["ble_rssi_stale"] else "",
+            data["hub_wifi_rssi"], data["hub_wifi_ssid"],
+        )
+        self._signal[lock_id] = data
+        if self.data and lock_id in self.data:
+            self.async_set_updated_data(
+                {**self.data, lock_id: {**self.data[lock_id], **data}}
+            )
+        self.hass.bus.async_fire("lockly_signal", data)
+        return data
+
     async def _mqtt_credentials(self, lock: dict, nonce: str | None) -> list[dict] | None:
         """Read the credential list over MQTT, for the host password.
 
@@ -912,6 +987,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
 
 # ── Service schemas ───────────────────────────────────────────────────────────
 
+_READ_SIGNAL_SCHEMA = vol.Schema({vol.Optional("lock_id"): cv.string})
 _LIST_GUESTS_SCHEMA = vol.Schema({
     vol.Required("lock_id"): cv.string,
 })
@@ -1030,6 +1106,25 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
             return
         await coordinator._maybe_read_lock_log(lock, force=True)
 
+    async def handle_read_signal(call) -> None:
+        """Read radio details for every lock, or one if lock_id is given.
+
+        Answers "why does this particular lock keep timing out" with a number
+        instead of an inference from where the hub is sitting. Results land on
+        the `lockly_signal` event and in the diagnostic sensors.
+        """
+        lock_id = call.data.get("lock_id")
+        locks = coordinator.locks
+        if lock_id:
+            one = coordinator._get_lock(lock_id)
+            if one is None:
+                _LOGGER.error("read_signal: lock_id %s not found", lock_id)
+                return
+            locks = [one]
+        for lock in locks:
+            await coordinator.async_read_signal(lock)
+
+    hass.services.async_register(DOMAIN, "read_signal", handle_read_signal, schema=_READ_SIGNAL_SCHEMA)
     hass.services.async_register(DOMAIN, "read_access_log", handle_read_access_log, schema=_LIST_GUESTS_SCHEMA)
     hass.services.async_register(DOMAIN, "query_passwords", handle_query_passwords, schema=_LIST_GUESTS_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_LIST_GUESTS,  handle_list_guests,  schema=_LIST_GUESTS_SCHEMA)

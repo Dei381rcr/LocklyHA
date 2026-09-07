@@ -125,3 +125,20 @@ read_access_log:
       example: "280033003131470432353835"
       selector:
         text:
+
+read_signal:
+  name: Read signal strength
+  description: >
+    Read radio details for a lock over the Lockly MQTT broker: the hub-to-lock
+    Bluetooth signal, the hub's WiFi signal and its firmware version. Useful for
+    working out why one lock times out when others on the same hub do not.
+    Populates the diagnostic sensors, which are disabled by default, and fires a
+    lockly_signal event. Requires a hub that is present on the MQTT channel;
+    hubs that are not answer "device is offline" and no reading is available.
+  fields:
+    lock_id:
+      name: Lock ID
+      description: Device UUID of one lock. Omit to read every lock.
+      required: false
+      selector:
+        text:
