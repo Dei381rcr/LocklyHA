@@ -562,6 +562,7 @@ _COD_MEANINGS = {
     "931": "Secure LINK already bound to another account",
     "932": "Secure LINK does not exist",
     "938": "ID format error",
+    "408": "cloud timed out relaying the request — transient, retry",
     "942": "hub timed out relaying to the lock (out of BLE range?) — transient",
     "943": "hub offline",
     "990": "general server error",
@@ -812,6 +813,19 @@ def describe_open_type(code: str | None) -> str:
     if code is None:
         return "unknown"
     return _OPEN_TYPE_LABELS.get(str(code), f"type {code}")
+
+
+# Codes worth trying the same call again for. These are timeouts somewhere in
+# the chain — the cloud relaying, or the hub reaching the lock over BLE — rather
+# than a refusal, so the identical request can succeed seconds later. Everything
+# else (930 not associated, 943 hub offline, 901 lock not found) is a state that
+# an immediate retry cannot change.
+_TRANSIENT_CODS = frozenset({"408", "942"})
+
+
+def is_transient_cod(code: str | None) -> bool:
+    """Whether a cloud error code is worth one immediate retry."""
+    return str(code) in _TRANSIENT_CODS
 
 
 def mask_email(address: str | None) -> str:
@@ -1387,6 +1401,7 @@ async def _api_send_directive(
     lock: dict,
     directive: str,
     cmd_hex: str,
+    result: dict | None = None,
 ) -> bool:
     """Send a lock/unlock directive via senddata.
 
@@ -1422,6 +1437,11 @@ async def _api_send_directive(
             body = await resp.json(content_type=None)
             cod = str(body.get("cod"))
             ack = body.get("ACK", "")
+            # Reported back so the caller can tell a timeout worth retrying from
+            # a refusal that will not change. Without it every failure looks
+            # alike and a transient one falls straight through to the fallback.
+            if result is not None:
+                result["cod"] = cod
             _LOGGER.debug(
                 "senddata directive=%s cod=%s ack=%s lock=%s",
                 directive, cod, ack or "(none)", lock.get("blename"),
@@ -1455,13 +1475,15 @@ async def api_unlock(
     nonce: str | None = None,
     caps: LockCapabilities | None = None,
     lock_pwd_override: str | None = None,
+    result: dict | None = None,
 ) -> bool:
-    """Send unlock command. Returns True if the lock acknowledged."""
+    """Send the command. Returns True if the lock acknowledged."""
     mc = str(lock["mc"])
     lock_pwd = lock_pwd_override if lock_pwd_override is not None else str(lock.get("hc") or "")
     return await _api_send_directive(
         session, jwt, email, des3_key, lock, "unlock",
         build_unlock_cmd(mc, lock["ID"], lock_pwd, nonce, caps=caps),
+        result=result,
     )
 
 
@@ -1474,13 +1496,15 @@ async def api_lock(
     nonce: str | None = None,
     caps: LockCapabilities | None = None,
     lock_pwd_override: str | None = None,
+    result: dict | None = None,
 ) -> bool:
-    """Send lock command. Returns True if the lock acknowledged."""
+    """Send the command. Returns True if the lock acknowledged."""
     mc = str(lock["mc"])
     lock_pwd = lock_pwd_override if lock_pwd_override is not None else str(lock.get("hc") or "")
     return await _api_send_directive(
         session, jwt, email, des3_key, lock, "lock",
         build_lock_cmd(mc, lock["ID"], lock_pwd, nonce, caps=caps),
+        result=result,
     )
 
 

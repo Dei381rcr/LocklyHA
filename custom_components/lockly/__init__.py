@@ -1,6 +1,7 @@
 """Lockly smart lock Home Assistant integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -37,6 +38,7 @@ from .api import (
     parse_ack,
     parse_pwd_list_ack,
     host_password_from,
+    is_transient_cod,
 )
 from .capabilities import LockCapabilities, resolve_capabilities
 from .mqtt import LocklyMQTTManager
@@ -50,6 +52,7 @@ from .const import (
     LIVE_INIT_MAX_ATTEMPTS,
     LIVE_INIT_REARM_SECONDS,
     SCAN_INTERVAL_SECONDS,
+    SENDDATA_RETRY_DELAY_SECONDS,
     SERVICE_ADD_GUEST,
     SERVICE_DELETE_GUEST,
     SERVICE_LIST_GUESTS,
@@ -443,11 +446,30 @@ class LocklyCoordinator(DataUpdateCoordinator):
         nonce = await self._refresh_nonce(lock)
         host_pwd = await self._resolve_host_password(lock, nonce)
         action = api_unlock if unlock else api_lock
+        result: dict = {}
         ok = await action(
             self._session, self.jwt, self.email, self.des3_key, lock,
             nonce=nonce, caps=self._caps_for(lock),
-            lock_pwd_override=host_pwd,
+            lock_pwd_override=host_pwd, result=result,
         )
+        # A timeout somewhere in the chain deserves the same call again before
+        # anything else: the MQTT fallback below only helps accounts whose
+        # senddata is permanently refused, so on a hub that merely timed out it
+        # substitutes a transport with no route for one that briefly failed.
+        if not ok and is_transient_cod(result.get("cod")):
+            _LOGGER.info(
+                "Lockly: %s for %s failed with a transient cod=%s, retrying once",
+                "unlock" if unlock else "lock",
+                lock.get("na") or lock.get("blename") or lock_id,
+                result.get("cod"),
+            )
+            await asyncio.sleep(SENDDATA_RETRY_DELAY_SECONDS)
+            nonce = await self._refresh_nonce(lock)
+            ok = await action(
+                self._session, self.jwt, self.email, self.des3_key, lock,
+                nonce=nonce, caps=self._caps_for(lock),
+                lock_pwd_override=host_pwd,
+            )
         if ok:
             self._set_optimistic_lock_state(lock_id, is_locked=not unlock)
             return True

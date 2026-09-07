@@ -52,6 +52,11 @@ LIVE_INIT_MAX_ATTEMPTS = 3
 # up while someone is still standing at the door wondering why.
 LIVE_INIT_REARM_SECONDS = 1800
 
+# Pause before re-sending a command the cloud or hub timed out on. Long enough
+# for a momentary relay failure to clear, short enough that a person waiting at
+# a door does not give up on it.
+SENDDATA_RETRY_DELAY_SECONDS = 3
+
 SERVICE_LIST_GUESTS  = "list_guests"
 SERVICE_ADD_GUEST    = "add_guest"
 SERVICE_DELETE_GUEST = "delete_guest"
