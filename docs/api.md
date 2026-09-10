@@ -986,6 +986,20 @@ This makes the MQTT channel a **second command transport** independent of
 `senddata`, which is the likely reason some accounts get `cod=930` from
 `senddata` while their app works normally.
 
+**Command confirmation is not the same as unsolicited push, and only the first
+is available to a third-party client.** A `lockCommandRequest` reply is routed to
+the requesting connection's own `client/<client_id>` topic — that is why
+commands and their resulting state work. But an *external* change (keypad, app,
+Matter) produces a `deviceStateCallback` the server pushes only to a client id
+that has been registered for push through Lockly's Firebase/AIPN service. That
+registration is `JobService.u()`, gated on a real FCM token from a genuine app
+install (see §17's FCM trace, which is correct *for this flow*). `DeviceStateController.subscribeDevice`
+listens on the ordinary client topic with no distinct subscription, so the topic
+is not the barrier — the missing piece is the FCM-backed registration that tells
+the server to notify this client of outside changes. Confirmed empirically: on a
+`PGD728FN`/`PGH260` account where commands work over this channel, keypad and app
+changes do not appear in Home Assistant.
+
 ---
 
 The FCM trace below is retained because it is accurate about notification

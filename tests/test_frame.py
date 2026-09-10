@@ -214,6 +214,19 @@ def test_pwd_list_parsing() -> None:
     check("guest password decoded", parsed["entries"][1]["password"], "1234")
     check("host_password_from picks slot 0",
           host_password_from(parsed["entries"]), "980798")
+def test_pwd_list_overrun_returns_none() -> None:
+    """A frame whose fields run past the block must not crash or half-parse.
+
+    A PGD728FN credential frame overran the walker and raised ValueError in
+    a user's log. Returning None keeps the caller on the cloud-password
+    fallback; a partial, misaligned parse would build a rejected unlock."""
+    print("password list overrun")
+    header = "00" + "01" + "01" + "01" + "01"      # claims 1 credential
+    entry = "01" + "20" + "01020304"               # pwd_size 0x20 overruns
+    parsed = parse_pwd_list_ack(_wrap_response(header + entry), MC, UUID)
+    check("returns None, no crash or half-parse", parsed, None)
+
+
 
 
 def test_pwd_list_ignores_padding() -> None:
@@ -485,6 +498,7 @@ def main() -> int:
         test_capabilities,
         test_query_pwd_frame,
         test_pwd_list_parsing,
+        test_pwd_list_overrun_returns_none,
         test_pwd_list_ignores_padding,
         test_user_type_2_has_no_schedule,
         test_no_passwords_sentinel,

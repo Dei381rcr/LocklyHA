@@ -413,13 +413,26 @@ def parse_pwd_list_ack(
             user_type = int(rest[0:2], 16)
             pwd_size = int(rest[2:4], 16)
             pwd_end = 4 + pwd_size * 2
+            id_end = pwd_end + (4 if five_hundred_group else 2)
+            if id_end > len(rest):
+                # The declared field widths run past the decrypted block, so the
+                # layout does not match what we model for this lock type.  The
+                # entries already read cannot be trusted either, so abandon the
+                # whole frame and let the caller fall back to the cloud
+                # host-password copy: handing back a misaligned slot would build
+                # an unlock frame the lock rejects, which is worse than not
+                # reading it at all.  Seen on PGD728FN, whose credential layout
+                # differs from the PGD628FN this parser was derived on.  Debug,
+                # not an exception, because it is an expected model difference
+                # rather than a code fault.
+                _LOGGER.debug(
+                    "Lockly: credential frame for %s overran at entry %d; layout "
+                    "not modelled for this lock, using the cloud password instead",
+                    uuid, len(result["entries"]),
+                )
+                return None
             password = _decode_pwd_digits(rest[4:pwd_end])
-            if five_hundred_group:
-                id_end = pwd_end + 4
-                pwd_id = int(rest[pwd_end:id_end], 16)
-            else:
-                id_end = pwd_end + 2
-                pwd_id = int(rest[pwd_end:id_end], 16)
+            pwd_id = int(rest[pwd_end:id_end], 16)
             result["entries"].append(
                 {"user_type": user_type, "pwd_id": pwd_id, "password": password}
             )

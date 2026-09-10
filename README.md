@@ -24,7 +24,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 | Door sensor state (if fitted) | ✅ Verified open and closed on a wired sensor |
 | Last access / who entered | ✅ Read from the lock; names resolve unless a slot is shared |
 | Guest PIN management (add / remove / list) | 🚧 In progress |
-| Real-time MQTT push (no-poll state updates) | 🚧 Works only if your hub is on the MQTT channel, see Known Limitations |
+| Real-time push of external (keypad / app / Matter) changes | ⛔ Needs an FCM token HA cannot obtain, see Known Limitations |
 | Multiple locks per account | ✅ |
 | Silent polling — lock does not beep during polls | ⚠️ Needs hub firmware ≥ build 422 |
 | Config flow UI | ✅ |
@@ -211,15 +211,27 @@ Lockly MQTT connected, subscribing to 'client/…'
 Lockly MQTT subscribed to 'client/…' at qos=[0]
 ```
 
-That is verified working, including on the build-417 hub. But a granted
-subscription only means the integration is listening — the hub still has to put
-state on the channel, and a hub reporting `device is offline` does not. So
-expect these lines regardless, and judge push by whether lock state actually
-changes when you use the keypad.
+That is verified working, including on the build-417 hub. But listening is not
+the same as being sent external state, and two flows share this channel — only
+one of which reaches Home Assistant:
 
-A `SUBACK 0x80` refusal here is not fatal either, since the broker was also
-observed delivering a message without granting a subscription, so the connection
-is kept in both cases.
+- **Command confirmation works.** The fresh state that comes back right after an
+  HA-initiated lock or unlock is routed to our own `client/<client_id>` topic.
+  Verified on a `PGD728FN` behind a `PGH260` hub: lock state is correct
+  immediately after every command.
+- **Unsolicited push does not, and probably cannot.** A lock changed at the
+  keypad, in the Lockly app, or over Matter is *not* reflected in HA. The server
+  only pushes external state changes to a client id registered through Lockly's
+  Firebase/AIPN push service, which needs a real FCM token from a genuine app
+  install (`JobService.u()` in the decompiled app). Home Assistant uses an
+  ephemeral client id that is never registered, so the server has no reason to
+  notify it.
+
+So state is accurate immediately after you act through HA, and otherwise stale
+until the next HA command — or the next successful poll, on hubs new enough for
+silent polling. A `SUBACK 0x80` refusal on the client topic is not fatal, since
+the broker was observed delivering a message without granting a subscription, so
+the connection is kept regardless.
 
 ### Authentication
 
@@ -242,9 +254,25 @@ Credentials (email and password) are stored in HA's config entry. The integratio
   `cod=930` — locking and unlocking both succeed. That account is on a
   `PGD728FN` behind a `PGH260` hub.
 
+  Reading the host password from the lock is not yet modelled for every lock
+  type — a `PGD728FN` credential frame has a layout this parser does not fully
+  decode, so on that model the command is built from the cloud's copy of the
+  password instead, which works. The earlier releases logged a traceback here;
+  that is fixed and the fallback is silent.
+
   Note what is *not* yet routed this way: the periodic status query and the
   access log still go through `senddata`, so on an affected account lock state
   can be stale even while commands work. That is the next thing to move across.
+- **Real-time push of external changes does not work, and probably cannot.**
+  State that arrives right after an HA-initiated lock or unlock is correct — that
+  reply is routed to our own MQTT client topic and is verified. But a lock
+  operated at the keypad, in the Lockly app, or over Matter is not reflected in
+  HA until the next HA command or successful poll. The server only pushes
+  unsolicited state to a client id registered through Lockly's Firebase/AIPN push
+  service, which requires a real FCM token from a genuine app install. Home
+  Assistant cannot obtain one, so the server never notifies it of outside
+  changes. This is a different limitation from the broker connection, which works
+  — it is the push *registration* that is closed to a third-party client.
 - **Silent polling requires hub firmware build ≥ 422** (for major-version-2 hubs). On older firmware `lock/cachedstatus/get` returns `cod=900` and state only updates at startup and after HA commands. Note that Lockly does not necessarily offer an upgrade: a PGH220 on `2.2.04.17` (build 417) reports itself up to date, five builds short of the requirement.
 
 - **Door sensor state is verified, but sensor _presence_ cannot be read from the lock.** Bit 0 of the status byte is the door circuit: `0` = closed, `1` = open. A closed door completes the circuit and an open door breaks it — but a lock with no sensor fitted is an open circuit permanently, so it reads `1` too. That makes `1` ambiguous between "door open" and "no sensor fitted", and this ACK carries no separate presence flag. (The hub's `lock/cachedstatus/get` response does have one, at bit 1, but that endpoint needs newer hub firmware — see above.)
