@@ -553,7 +553,6 @@ class LocklyCoordinator(DataUpdateCoordinator):
         if mqtt is None or not mqtt.connected:
             return False
         name = lock.get("na") or lock.get("blename") or lock["ID"]
-        caps = self._caps_for(lock)
 
         # Both inputs are re-fetched rather than trusted. Reaching this method
         # means senddata refused the command, and on those accounts it refuses
@@ -562,6 +561,14 @@ class LocklyCoordinator(DataUpdateCoordinator):
         fresh = await self._mqtt_nonce(lock)
         if fresh:
             nonce = fresh
+
+        # Capabilities are read AFTER the nonce query, not before: that query's
+        # status ACK is where the real lock type is learned, and it can differ
+        # from the lock-list heuristic. Reading caps first meant the command was
+        # built with the wrong code — a type-105 PGK728WRHK needs 0x52 but was
+        # getting the default 0x22. Reported and diagnosed on issue #3.
+        caps = self._caps_for(lock)
+
         if host_pwd is None:
             host_pwd = self._host_passwords.get(lock["ID"])
         if host_pwd is None:
