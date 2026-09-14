@@ -588,6 +588,61 @@ on `BluetoothBean` predicates, all of which resolve from a **numeric lock type**
 
 `isSupportTimestamp()` is `(isHost() && isVision()) || (isSupport82Cmd() && !isPGI301())`.
 
+### The `0x52` frame — WiFi-native locks
+
+`isSupport82Cmd()` names every WiFi-native model unconditionally, `PGK728WRHK`
+and `PGD728FG25` among them, so these locks never take the `22` layout. Three
+fields differ, and all three have to be right together: two of them change the
+frame's *length*, so one correction on its own moves the corruption rather than
+removing it.
+
+```
+52  <mc_len>  <enc_mc>  <unlock_type>  <pwd>  <user_id>  <action>  <str3>  <epoch_ms>
+```
+
+| Field | Java source | Difference from `22` |
+|---|---|---|
+| `user_id` | `getUserId()` | **two bytes, little-endian.** Both of its branches return `getCmdLenString(i)`, which is `{i % 256, i / 256}` — where `22`'s `DataUtils.m86645J(pwdId)` is one byte |
+| `epoch_ms` | `DataUtils.p(j)` | **eight bytes, little-endian.** `p(long)` is `d(H(j))`; `H` writes the long into an 8-byte `ByteBuffer` and reverses it. Not the packed `yyMMddHHmmss` form, and not the stored nonce — `isSupportTimestamp()` is true for all of these, so the lock's own value is never replayed |
+| type byte | `DataUtils.m(pad, type)` | low nibble is **`B`** for a host (`isHost() ? 11 : isLongTerm() ? 13 : 12`), not `5` |
+
+The timestamp is the phone's own clock, not a server value: `UnlockUtil.C()`
+passes `System.currentTimeMillis()` down through `B()` to `O()`, which calls
+`getDataForNetwork(bean, getLockPwd(), type, timeMillis)`.
+
+#### `user_id` is zero for the lock's owner
+
+`isSupportAccessUser()` is true for these models, so `getUserId()` reads
+`BluetoothBean.getUserId()` rather than the pwdId. For the account that owns the
+lock that value is **0**, and the app says so itself:
+
+```java
+public boolean isOwner() {
+    return this.userId == 0 && this.adminId == 0;
+}
+```
+
+Nothing assigns a host a non-zero `userId`. Across both decompiled trees the only
+writers are `LockerManager` (from `MyLockerBean` / `MyTempLockerBean`),
+`MyTempLockerUtil` (from a guest's `TempKey` blob) and `SubAdminDoorbellUtil`;
+`MyLockerBean.userId` in turn is only ever written from the SQLite column
+`user_id` or back from a bean. The cloud restore path,
+`UserManager.O0(BackupLockBean, String)`, copies some sixty fields out of the
+device record and never touches it.
+
+The cloud's `userAcuId` is the same field round-tripped, not an independent
+source: `BackupLockBean.userId` is `@SerializedName("userAcuId")` and
+`BackupLockBean.getBackupLockBean(bluetoothBean)` fills it from the bean when the
+app backs a lock up. The `acu/list` and `acu/getUserAcuId` values identify access
+users, not the owner, and do not belong in this field.
+
+#### What stays at encryptType 5
+
+Only the lock/unlock frame is overridden. `QueryPwd147Cmd` asks
+`getTenantAccessEncryptType()`, which falls straight through to
+`getEncryptType()` for a host, so `0x93` keeps `5` on these locks — which means
+the `0xFA` they return to it is still unexplained.
+
 `BluetoothBean.getLockType()` parses the bean's `lockType` field and **falls back
 to 1** when absent. `qrylknew` does not return `lockType` — the lock reports it
 itself, as byte 18 of the decrypted status payload (`data[36:38]`, read by

@@ -120,6 +120,53 @@ def test_nonce_omitted_when_absent() -> None:
     check("nonce absent", NONCE in without, False)
 
 
+def test_82_cmd_host_frame() -> None:
+    """The 0x52 frame a WiFi-native lock expects, field by field.
+
+    Every assertion here comes from NewUnlockCmd.getData's isSupport82Cmd branch
+    and the helpers it calls, not from a capture: getUserId() -> getCmdLenString
+    (two bytes, little-endian), DataUtils.p (epoch ms, eight bytes little-endian)
+    in place of the stored nonce, and encryptType 11 in the type byte's low
+    nibble.  A PGK728WRHK is type 105.
+    """
+    print("0x52 host frame")
+    caps = LockCapabilities(lock_type=105, model="PGK728WRHK")
+    enc_mc = encrypt_master_code(MC, UUID)
+    frame = build_unlock_cmd(MC, UUID, HC, NONCE, caps=caps)
+    plaintext = decrypt_frame(frame, MC, UUID)
+
+    check("command is 0x52", plaintext[:2], "52")
+    check("mc_len + enc_mc unchanged", plaintext[2:20], "08" + enc_mc)
+    check("unlock type is host", plaintext[20:22], "02")
+    check("hc is present", plaintext[22:34], "090800070908")
+    # getUserId() on an isSupportAccessUser lock is BluetoothBean.getUserId(),
+    # and isOwner() is defined as userId == 0 && adminId == 0.
+    check("user id is two zero bytes", plaintext[34:38], "0000")
+    check("action after the two-byte slot", plaintext[38:40], "01")
+    check("str3 after the action", plaintext[40:42], "01")
+
+    tail = plaintext[42:58]
+    check("tail is 8 bytes", len(tail), 16)
+    check("stored nonce is not sent", NONCE in plaintext, False)
+    sent_ms = int.from_bytes(bytes.fromhex(tail), "little")
+    now_ms = int(datetime.now().timestamp() * 1000)
+    check("tail is the current epoch in ms", abs(sent_ms - now_ms) < 60_000, True)
+
+    type_byte = bytes.fromhex(frame)[-2]
+    check("encrypt type is 0xB", type_byte & 0x0F, 0x0B)
+
+
+def test_22_cmd_type_byte_unchanged() -> None:
+    """The 0x22 path keeps encryptType 5 — only the 0x52 branch overrides it."""
+    print("0x22 type byte")
+    frame = bytes.fromhex(build_unlock_cmd(MC, UUID, HC, NONCE))
+    check("encrypt type is 5", frame[-2] & 0x0F, 0x5)
+    status = bytes.fromhex(build_query_status_cmd(MC, UUID))
+    check("status query is 5 too", status[-2] & 0x0F, 0x5)
+    pwd = bytes.fromhex(build_query_pwd_cmd(MC, UUID, 0, NONCE))
+    check("QueryPwd147 is 5 too", pwd[-2] & 0x0F, 0x5)
+
+
 def test_status_frame_unchanged() -> None:
     """The status query frame is known-good; the refactor must not alter it."""
     print("status query frame")
@@ -493,6 +540,8 @@ def main() -> int:
         test_unlock_plaintext,
         test_lock_differs_only_in_action,
         test_nonce_omitted_when_absent,
+        test_82_cmd_host_frame,
+        test_22_cmd_type_byte_unchanged,
         test_status_frame_unchanged,
         test_ack_parse_real_capture,
         test_capabilities,

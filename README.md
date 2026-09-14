@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.3-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.3)
+[![Version](https://img.shields.io/badge/version-0.7.4-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.4)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -263,6 +263,21 @@ Credentials (email and password) are stored in HA's config entry. The integratio
   Note what is *not* yet routed this way: the periodic status query and the
   access log still go through `senddata`, so on an affected account lock state
   can be stale even while commands work. That is the next thing to move across.
+- **WiFi-native locks: the command frame is corrected in 0.7.4, and untested.**
+  Locks with no hub at all reach the broker and are then refused by the lock
+  itself with `0xFF`, "wrong password". Reading the app's source shows the
+  credential was never the problem — the frame was. The `0x52` command these
+  locks use carries a two-byte access-user field where the integration sent one,
+  ends in the phone's clock as an 8-byte value rather than the lock's stored
+  nonce, and is wrapped with encryption type `0xB` rather than `5`. The first of
+  those left every later field a byte out of place, which is enough on its own to
+  fail a credential check that would otherwise pass. All three are fixed
+  together; sending one without the others only moves the corruption.
+
+  This is reasoned from `NewUnlockCmd.getData` and the helpers it calls, not from
+  a capture, and nobody has confirmed it on hardware yet. If you have a
+  `PGK728WRHK`, `PGD728FG25` or another hubless model, a lock/unlock attempt with
+  debug logging on would settle it — issues #2 and #3.
 - **Real-time push of external changes does not work, and probably cannot.**
   State that arrives right after an HA-initiated lock or unlock is correct — that
   reply is routed to our own MQTT client topic and is verified. But a lock

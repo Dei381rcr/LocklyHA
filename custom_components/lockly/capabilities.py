@@ -237,8 +237,9 @@ class LockCapabilities:
 
     @property
     def slot_id(self) -> int:
-        """Credential slot in the frame — DataUtils.m86645J(pwdId).
+        """Value of the frame's slot field.
 
+        On the 0x22 path this is the credential slot, DataUtils.m86645J(pwdId).
         LockerManager sets pwdId to "0" when it builds the bean for a host that
         is not a sub-admin, and NewUnlockCmd's 0x52 branch does the same
         explicitly for hosts.  ``getPwdId()``'s "1" is only the fallback for a
@@ -247,8 +248,49 @@ class LockCapabilities:
 
         Sending slot 1 with the host password makes the lock compare that
         password against a different credential and reject it with BLE error FF.
+
+        On the 0x52 path the field is getUserId() instead, and for hardware whose
+        isSupportAccessUser() is true that reads BluetoothBean.getUserId() rather
+        than the pwdId this property models.  For a host that is still 0:
+        ``isOwner()`` is defined as ``userId == 0 && adminId == 0``, and nothing
+        in either decompiled app assigns a host a non-zero userId — the cloud
+        restore path (UserManager.O0) copies sixty-odd fields out of the device
+        record and never that one.  A guest's userId arrives in their key blob
+        and is not something this integration has.
         """
         return 0 if self.is_host else 1
+
+    @property
+    def wide_slot_field(self) -> bool:
+        """The slot field is two bytes, little-endian, rather than one.
+
+        NewUnlockCmd.getUserId() runs both of its branches through
+        getCmdLenString(), which is ``{i % 256, i / 256}`` — so every 0x52
+        command carries a two-byte field where the 0x22 path carries one.
+        Sending one byte leaves the frame short, and the lock then reads the
+        action, str3 and timestamp fields each a byte early.
+        """
+        return self.supports_82_cmd
+
+    @property
+    def encrypt_type(self) -> int:
+        """Low nibble of the outer frame's type byte.
+
+        getEncryptType() returns 5 (AES-128/ECB) for a host, but NewUnlockCmd
+        overrides it twice: a Vision host takes 11 before either branch, and the
+        0x52 branch sets ``isHost() ? 11 : isLongTerm() ? 13 : 12``.  The
+        long-term-guest case is not modelled because this integration only ever
+        builds host and plain-guest commands.
+
+        This applies to the lock/unlock frame only.  The status query and
+        QueryPwd147 stay at 5: QueryPwd147Cmd asks getTenantAccessEncryptType(),
+        which falls straight through to getEncryptType() for a host.
+        """
+        if self.supports_82_cmd:
+            return 11 if self.is_host else 12
+        if self.is_host and self.is_vision:
+            return 11
+        return 5
 
     @property
     def is_simple_attendance(self) -> bool:
@@ -302,6 +344,7 @@ class LockCapabilities:
         if self.model:
             parts.append(self.model)
         parts.append(f"cmd=0x{self.cmd_code}")
+        parts.append(f"enc=0x{self.encrypt_type:X}")
         if self.supports_82_cmd:
             parts.append("82cmd")
         if self.is_vision:

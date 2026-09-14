@@ -184,16 +184,22 @@ def _assemble_fields(*fields: str) -> str:
     return "".join(out)
 
 
-def _aes_wrap(raw_hex: str, aes_key: bytes) -> str:
+def _aes_wrap(raw_hex: str, aes_key: bytes, encrypt_type: int = 0x5) -> str:
     """Zero-pad to a 16-byte boundary, AES-ECB encrypt, wrap in a BLE frame.
 
     The frame's type byte holds the zero-padding length in its high nibble
-    (AESBean.getZeroPadding) and 5 = AES-128/ECB in its low nibble.
+    (AESBean.getZeroPadding) and the command's encryption type in its low —
+    DataUtils.m assembles it as ``toHexString(zeroPadding.length() / 2) +
+    toHexString(encryptType)``.
+
+    5 is AES-128/ECB, which is what getEncryptType() returns for a host on every
+    command this integration builds.  NewUnlockCmd's 0x52 branch overrides it;
+    see LockCapabilities.encrypt_type.
     """
     remainder = (len(raw_hex) // 2) % 16
     padding = "" if remainder == 0 else "00" * (16 - remainder)
     encrypted = AES.new(aes_key, AES.MODE_ECB).encrypt(bytes.fromhex(raw_hex + padding))
-    type_byte = ((len(padding) // 2) << 4) | 0x5
+    type_byte = ((len(padding) // 2) << 4) | (encrypt_type & 0xF)
     return build_ble_frame(encrypted, type_byte).hex().upper()
 
 
@@ -206,6 +212,18 @@ def _timestamp_hex() -> str:
     """DataUtils.m86660o: current local time as packed yyMMddHHmmss (6 bytes)."""
     time_str = datetime.now().strftime("%y%m%d%H%M%S")
     return "".join(f"{int(time_str[i:i+2]):02x}" for i in range(0, 12, 2))
+
+
+def _epoch_ms_hex() -> str:
+    """DataUtils.p: the epoch millisecond count, 8 bytes little-endian.
+
+    ``p(long)`` is ``d(H(j))``: H writes the long into an 8-byte ByteBuffer and
+    then reverses the array, and d hexes it.  This is a different encoding from
+    _timestamp_hex above, and twice as wide — a 0x52 command built with the
+    packed form is four hex characters short and the lock reads every field
+    after it at the wrong offset.
+    """
+    return int(datetime.now().timestamp() * 1000).to_bytes(8, "little").hex().upper()
 
 
 def build_query_status_cmd(master_code: str, uuid: str) -> str:
@@ -222,47 +240,56 @@ def build_query_status_cmd(master_code: str, uuid: str) -> str:
 
 
 def _build_cmd_hex(
-    cmd_code: str,
     master_code: str,
     uuid: str,
     lock_pwd: str = "",
     *,
+    caps: LockCapabilities,
     action: str = ACTION_UNLOCK,
     nonce: str | None = None,
     via_hub: bool = True,
-    slot_id: int = 1,
     unlock_type: str = UNLOCK_TYPE_HOST,
 ) -> str:
     """Build an AES-encrypted lock/unlock BLE command frame.
 
     Field order is NewUnlockCmd.getData -> HexUtils.m86802c:
 
-        cmd + mc_len + enc_mc + unlock_type + pwd + slot_id + action + str3 + nonce
+        cmd + mc_len + enc_mc + unlock_type + pwd + slot + action + str3 + tail
 
     - ``lock_pwd`` is the lock's "hc" field (BluetoothBean.getLockPwd()), digit
       expanded by HexUtils.m86803d.  The lock NACKs a command that omits it.
     - ``via_hub`` selects str3: getDataForHub passes "1", getDataForBluetooth and
       getDataForNetwork pass "0".  Every cloud senddata command is relayed by a
       hub, so this is "01" — sending "00" here is what made unlock fail before.
-    - ``nonce`` is the 8-byte value from the lock's last status ACK
-      (QueryLockStatusCmd stores data[38:54] as ble_aes_random_numbers_1062).
-      When None the field is omitted, matching the app before it has ever seen a
+    - the slot field is one byte on the 0x22 path (DataUtils.m86645J of pwdId)
+      and two, little-endian, on 0x52, where getUserId() runs both of its
+      branches through getCmdLenString.  See LockCapabilities.wide_slot_field.
+    - the trailing field is the 8-byte value from the lock's last status ACK
+      (QueryLockStatusCmd stores data[38:54] as ble_aes_random_numbers_1062),
+      except on hardware whose isSupportTimestamp() is true, where the app sends
+      the phone's own clock instead and never the stored value.  When neither is
+      available the field is omitted, matching the app before it has ever seen a
       status response.
-    - ``slot_id`` is DataUtils.m86645J(pwdId), or getUserId() on 0x52 locks.
     """
     enc_mc = encrypt_master_code(master_code, uuid)
+    slot = (
+        caps.slot_id.to_bytes(2, "little").hex()
+        if caps.wide_slot_field
+        else f"{caps.slot_id:x}"
+    )
+    tail = _epoch_ms_hex() if caps.supports_timestamp else (nonce or "").upper()
     raw = _assemble_fields(
-        cmd_code,
+        caps.cmd_code,
         f"{len(enc_mc) // 2:d}",
         enc_mc,
         unlock_type,
         _expand_digits(lock_pwd),
-        f"{slot_id:x}",
+        slot,
         action,
         _STR3_HUB if via_hub else _STR3_DIRECT,
-        (nonce or "").upper(),
+        tail,
     )
-    return _aes_wrap(raw, derive_aes_key(master_code, uuid))
+    return _aes_wrap(raw, derive_aes_key(master_code, uuid), caps.encrypt_type)
 
 
 def build_unlock_cmd(
@@ -279,13 +306,12 @@ def build_unlock_cmd(
     it causes a silent NACK from the lock.
     """
     return _build_cmd_hex(
-        (caps or DEFAULT_CAPABILITIES).cmd_code,
         master_code,
         uuid,
         lock_pwd,
+        caps=caps or DEFAULT_CAPABILITIES,
         action=ACTION_UNLOCK,
         nonce=nonce,
-        slot_id=(caps or DEFAULT_CAPABILITIES).slot_id,
     )
 
 
@@ -304,13 +330,12 @@ def build_lock_cmd(
     differ from unlock.
     """
     return _build_cmd_hex(
-        (caps or DEFAULT_CAPABILITIES).cmd_code,
         master_code,
         uuid,
         lock_pwd,
+        caps=caps or DEFAULT_CAPABILITIES,
         action=ACTION_LOCK,
         nonce=nonce,
-        slot_id=(caps or DEFAULT_CAPABILITIES).slot_id,
     )
 
 
