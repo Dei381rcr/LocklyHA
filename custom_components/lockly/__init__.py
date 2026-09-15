@@ -214,11 +214,22 @@ class LocklyCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Lockly: authenticated, found %d lock(s)", len(self.locks))
         for lock in self.locks:
             name = lock.get("na") or lock.get("blename") or lock["ID"]
-            missing = [f for f in ("mc", "hc", "hubid") if not lock.get(f)]
+            missing = [f for f in ("mc", "hc") if not lock.get(f)]
             if missing:
                 _LOGGER.warning(
                     "Lockly: lock %s is missing %s — commands will fail without it",
                     name, ", ".join(missing),
+                )
+            # An empty hubid is not a fault. It means the lock talks to WiFi
+            # directly with no hub to relay through, which is normal hardware
+            # and works: senddata cannot serve those locks, and commands go over
+            # the broker instead. This warned until 0.7.5, on locks that were
+            # locking and unlocking perfectly.
+            elif not lock.get("hubid"):
+                _LOGGER.info(
+                    "Lockly: lock %s has no hub — it is WiFi-native, so commands "
+                    "go over the MQTT transport rather than senddata",
+                    name,
                 )
             # Model/firmware/topology only; mc, hc, iotsecret and iotprodkey are
             # credentials and must never reach the log.  clientId and iotdm are
@@ -488,17 +499,29 @@ class LocklyCoordinator(DataUpdateCoordinator):
             self._set_optimistic_lock_state(lock_id, is_locked=not unlock)
             return True
 
-        _LOGGER.warning(
-            "Lockly: %s failed for %s — see the senddata warning above",
-            "unlock" if unlock else "lock",
-            lock.get("na") or lock.get("blename") or lock_id,
-        )
         # Second transport. The app reaches some locks over the MQTT broker
         # rather than senddata, which is why a few accounts get cod=930 from
         # senddata while their app works fine. No optimistic state update here:
         # a queued publish is not an acted-on command, and the server replies
         # asynchronously on the client topic.
-        return await self._try_mqtt_command(lock, nonce, host_pwd, unlock=unlock)
+        #
+        # Nothing is warned about yet. On a hubless lock senddata refuses every
+        # command by design and the broker then carries it, so announcing a
+        # failure here put a warning above every successful unlock.
+        _LOGGER.info(
+            "Lockly: senddata would not carry %s for %s — trying the MQTT transport",
+            "unlock" if unlock else "lock",
+            lock.get("na") or lock.get("blename") or lock_id,
+        )
+        if await self._try_mqtt_command(lock, nonce, host_pwd, unlock=unlock):
+            return True
+        _LOGGER.warning(
+            "Lockly: %s failed for %s — senddata refused it and the MQTT "
+            "transport did not carry it either; see the errors above",
+            "unlock" if unlock else "lock",
+            lock.get("na") or lock.get("blename") or lock_id,
+        )
+        return False
 
     async def _mqtt_exchange(self, lock: dict, frame_hex: str) -> dict | None:
         """Relay a frame to the lock over MQTT and parse whatever it answers.

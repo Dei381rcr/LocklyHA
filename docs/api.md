@@ -596,6 +596,12 @@ fields differ, and all three have to be right together: two of them change the
 frame's *length*, so one correction on its own moves the corruption rather than
 removing it.
 
+> **Confirmed on hardware.** This layout was derived from the app's source
+> rather than from a capture, and was then verified on two `PGK728WRHK` (Lockly
+> Visage) on firmware 1.14.31 and 3.00.24: with all three fields corrected, lock
+> and unlock both succeed over the broker and the state change comes back on the
+> client topic. Before the fix the same locks returned `0xFF` to every command.
+
 ```
 52  <mc_len>  <enc_mc>  <unlock_type>  <pwd>  <user_id>  <action>  <str3>  <epoch_ms>
 ```

@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.4-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.4)
+[![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.5)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -19,6 +19,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 | Unlock from HA | ✅ Verified on PGD628FN + PGH220 hub |
 | Lock from HA | 🚧 Implemented; hard to verify on auto-locking locks |
 | Commands over MQTT when senddata is refused | ✅ Verified on PGD728FN + PGH260 hub (cod=930 accounts) |
+| Hubless WiFi-native locks | ✅ Verified from 0.7.4 on two PGK728WRHK (Lockly Visage), firmware 1.14.31 and 3.00.24 |
 | Lock state (locked / unlocked) | ✅ At startup and after HA commands |
 | Battery low warning | ✅ |
 | Door sensor state (if fitted) | ✅ Verified open and closed on a wired sensor |
@@ -35,10 +36,10 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 ## Prerequisites
 
 - Home Assistant 2024.1 or later
-- A Lockly account with at least one PGH-series hub (cloud-connected lock)
+- A Lockly account, and a lock that reaches the internet — either behind a PGH-series hub, or a WiFi-native model that connects on its own
 - Your Lockly app email and password
 
-> Locks that connect only over Bluetooth (no hub) are **not** supported. The integration uses the Lockly cloud API; a hub bridging the lock to the internet is required.
+> Locks that connect only over Bluetooth are **not** supported. The integration uses the Lockly cloud API, so the lock has to be reachable from it: through a hub, or by its own WiFi. Hubless WiFi-native locks are supported from 0.7.4 and use a different transport — see [Known Limitations](#known-limitations).
 
 ---
 
@@ -241,7 +242,10 @@ Credentials (email and password) are stored in HA's config entry. The integratio
 
 ## Known Limitations
 
-- **Locks with no PGH hub are not supported.** This covers both Bluetooth-only locks and WiFi-native models such as the `PGD728FG25`, which connect straight to WiFi. The `senddata` endpoint relays commands through a hub, so with an empty `hubid` the cloud returns `cod=930` for both state and commands. The integration now detects this and says so rather than reporting a bare error code. Supporting these locks needs a different API path (tracked in issue #2). The MQTT command transport below is now a working candidate for them: it reaches locks without using `senddata` at all, and is confirmed on an account where every `senddata` call is refused.
+- **Bluetooth-only locks are not supported.** The integration talks to the Lockly cloud, so a lock it can never reach is out of scope. WiFi-native locks with no hub *are* supported — see below.
+- **Hubless WiFi-native locks: commands work, `cod=930` in the log is expected.** Models such as the `PGK728WRHK` and `PGD728FG25` connect straight to WiFi with no hub to relay through, so their `hubid` is empty and the `senddata` endpoint refuses everything they send with `cod=930`. That is by design and not a fault: commands for these locks go over the MQTT transport instead, and from 0.7.4 they work. Verified on two `PGK728WRHK` (Lockly Visage) on firmware 1.14.31 and 3.00.24 — lock and unlock both succeed and the state change is confirmed back over the broker.
+
+  What still does not work on them: `senddata`'s state and access-log queries, for the same reason, and `QueryPwd147` (`0x93`) returns `0xFA`, so the host credential is read from the cloud's copy rather than from the lock. Neither blocks locking or unlocking.
 - **Unlock is verified from 0.5.0.** Two fields in the command frame were wrong: the `str3` hub flag was sent as `00` instead of `01`, and the credential slot was sent as `1` instead of `0` (the host credential lives in slot 0). Both had to be right at once, which is why this took so long to find. Confirmed against physical hardware — a PGD628FN on firmware 4.03.15 behind a PGH220 hub.
 - **Commands fall back to MQTT when `senddata` fails, and this is verified.** If
   your logs are full of `cod=930` while the official Lockly app controls your
@@ -263,21 +267,20 @@ Credentials (email and password) are stored in HA's config entry. The integratio
   Note what is *not* yet routed this way: the periodic status query and the
   access log still go through `senddata`, so on an affected account lock state
   can be stale even while commands work. That is the next thing to move across.
-- **WiFi-native locks: the command frame is corrected in 0.7.4, and untested.**
-  Locks with no hub at all reach the broker and are then refused by the lock
-  itself with `0xFF`, "wrong password". Reading the app's source shows the
-  credential was never the problem — the frame was. The `0x52` command these
-  locks use carries a two-byte access-user field where the integration sent one,
-  ends in the phone's clock as an 8-byte value rather than the lock's stored
-  nonce, and is wrapped with encryption type `0xB` rather than `5`. The first of
-  those left every later field a byte out of place, which is enough on its own to
-  fail a credential check that would otherwise pass. All three are fixed
-  together; sending one without the others only moves the corruption.
+- **WiFi-native locks: the command frame was corrected in 0.7.4, and is confirmed.**
+  Locks with no hub at all reached the broker and were then refused by the lock
+  itself with `0xFF`, "wrong password". The credential was never the problem —
+  the frame was. The `0x52` command these locks use carries a two-byte
+  access-user field where the integration sent one, ends in the phone's clock as
+  an 8-byte value rather than the lock's stored nonce, and is wrapped with
+  encryption type `0xB` rather than `5`. The first of those left every later
+  field a byte out of place, which is enough on its own to fail a credential
+  check that would otherwise pass. All three shipped together; sending one
+  without the others only moves the corruption.
 
-  This is reasoned from `NewUnlockCmd.getData` and the helpers it calls, not from
-  a capture, and nobody has confirmed it on hardware yet. If you have a
-  `PGK728WRHK`, `PGD728FG25` or another hubless model, a lock/unlock attempt with
-  debug logging on would settle it — issues #2 and #3.
+  Diagnosed from `NewUnlockCmd.getData` rather than from a capture, by the
+  reporter of [issue #3](https://github.com/Forcky/LocklyHA/issues/3), and
+  confirmed by them on two locks within hours of the release.
 - **Real-time push of external changes does not work, and probably cannot.**
   State that arrives right after an HA-initiated lock or unlock is correct — that
   reply is routed to our own MQTT client topic and is verified. But a lock

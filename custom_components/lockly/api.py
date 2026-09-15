@@ -595,8 +595,9 @@ _COD_MEANINGS = {
     "910": "para not encrypted",
     "920": "endpoint rejected the request",
     "930": "hub/Secure LINK not associated with this lock — check the lock is "
-           "bound to a hub in the Lockly app; WiFi-native locks with no hub "
-           "cannot use this endpoint",
+           "bound to a hub in the Lockly app. A WiFi-native lock with no hub "
+           "always gets this from senddata; it is expected, and commands for "
+           "those locks go over the MQTT transport instead",
     "931": "Secure LINK already bound to another account",
     "932": "Secure LINK does not exist",
     "938": "ID format error",
@@ -1448,10 +1449,14 @@ async def _api_send_directive(
     """
     hub_id = str(lock.get("hubid") or "")
     if not hub_id:
-        _LOGGER.error(
-            "Lock %s has no hub (hubid is empty) — the senddata endpoint relays "
-            "commands through a Lockly hub and cannot control this lock. "
-            "WiFi-native locks are not yet supported; see issue #2.",
+        # Not an error, and not a dead end: senddata relays through a hub, so a
+        # WiFi-native lock can never use it, and the caller falls back to the
+        # MQTT transport that does control these locks. Confirmed on two
+        # PGK728WRHK from 0.7.4. This used to be logged at ERROR, once per
+        # command, on hardware that was working.
+        _LOGGER.debug(
+            "Lockly: %s has no hub, so senddata cannot serve it — using the "
+            "MQTT transport instead",
             lock.get("blename") or lock.get("ID"),
         )
         return False
