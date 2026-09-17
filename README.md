@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.6-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.6)
+[![Version](https://img.shields.io/badge/version-0.7.7-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.7)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -18,6 +18,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 |---|---|
 | Unlock from HA | ✅ Verified on PGD628FN + PGH220 hub |
 | Lock from HA | 🚧 Implemented; hard to verify on auto-locking locks |
+| In-progress state while a command runs | ✅ From 0.7.7 |
 | Commands over MQTT when senddata is refused | ✅ Verified on PGD728FN + PGH260 hub (cod=930 accounts) |
 | Hubless WiFi-native locks | ✅ Verified from 0.7.4 on two PGK728WRHK (Lockly Visage), firmware 1.14.31 and 3.00.24 |
 | Lock state (locked / unlocked) | ✅ At startup and after HA commands |
@@ -114,12 +115,20 @@ Each lock creates four entities:
 
 ### Lock entity
 
-- **State**: `locked` or `unlocked`
+- **State**: `locked` or `unlocked`, and `locking` / `unlocking` while a command
+  is in flight (from 0.7.7)
 - **Services**: `lock.lock`, `lock.unlock`
 - **Attributes**:
   - `door_sensor_open` — door circuit state, if a sensor is fitted. `true` also occurs on locks with no sensor; see [Door sensor](#door-sensor)
   - `firmware_version` — lock firmware string (available from live query)
   - `auto_unlock_delay_s` — configured auto-lock delay in seconds (available from live query)
+
+> **How long `locking` / `unlocking` lasts depends on your hardware.** It covers
+> the whole command, so on a hub-attached lock it is roughly one `senddata`
+> round trip. On a hubless WiFi-native lock it spans two transports — `senddata`
+> being refused, then the command going over the broker — so it is visibly
+> longer. That is the entity reporting honestly how long the command takes, not
+> a stall. It clears even if the command fails.
 
 ### Battery sensor
 
