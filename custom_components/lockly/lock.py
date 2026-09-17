@@ -57,14 +57,6 @@ class LocklyLock(CoordinatorEntity, LockEntity):
         return self._lock_data["is_locked"]
 
     @property
-    def is_locking(self) -> bool:
-        return False
-
-    @property
-    def is_unlocking(self) -> bool:
-        return False
-
-    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         d = self._lock_data
         attrs: dict[str, Any] = {}
@@ -75,7 +67,21 @@ class LocklyLock(CoordinatorEntity, LockEntity):
         return attrs
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        await self.coordinator.async_unlock_lock(self._lock_id)
+        self._attr_is_locking = False
+        self._attr_is_unlocking = True
+        self.async_write_ha_state()
+        try:
+            await self.coordinator.async_unlock_lock(self._lock_id)
+        finally:
+            self._attr_is_unlocking = False
+            self.async_write_ha_state()
 
     async def async_lock(self, **kwargs: Any) -> None:
-        await self.coordinator.async_lock_lock(self._lock_id)
+        self._attr_is_unlocking = False
+        self._attr_is_locking = True
+        self.async_write_ha_state()
+        try:
+            await self.coordinator.async_lock_lock(self._lock_id)
+        finally:
+            self._attr_is_locking = False
+            self.async_write_ha_state()
