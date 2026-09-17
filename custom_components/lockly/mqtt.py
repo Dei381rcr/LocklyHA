@@ -36,6 +36,26 @@ _CLIENT_TOPIC_PREFIX = "client/"
 # Give up after this many non-permanent refusals rather than reconnecting forever.
 _MAX_REFUSALS = 3
 
+# Values a deviceStateCallback carries for the two states this reads. The word
+# forms for the lock are what a Visage actually sends, captured on issue #5; the
+# numeric ones are what the APK's own constants describe. The magnet word forms
+# are defensive — no lock has been seen sending one, because these locks push no
+# magnet state at all — so they are a guess at shape, not an observation.
+_LOCKED_TRUE = frozenset({"1", "true", "locked"})
+_LOCKED_FALSE = frozenset({"0", "false", "unlocked"})
+_MAGNET_TRUE = frozenset({"1", "true", "open"})
+_MAGNET_FALSE = frozenset({"0", "false", "closed"})
+
+
+def _as_bool(raw: object, true_set: frozenset, false_set: frozenset) -> bool | None:
+    """Read one state value, or None when it is not a form we know."""
+    value = str(raw).strip().lower()
+    if value in true_set:
+        return True
+    if value in false_set:
+        return False
+    return None
+
 # How long to wait for the lock to answer a frame relayed over the broker.
 # Observed round trips are under two seconds; this allows for a sleeping lock.
 _RESPONSE_TIMEOUT = 20.0
@@ -459,7 +479,15 @@ class LocklyMQTTManager:
             return None
 
     async def _process_device_state(self, data: dict) -> None:
-        items = data.get("items") or []
+        # The item list arrives under "payload", the same as every other message
+        # this client handles. It was read from the root here for a long time,
+        # from an APK reading no capture ever confirmed, so every callback the
+        # broker sent was dropped — which is why external changes looked
+        # impossible to receive. Captured from a Visage on issue #5. The root
+        # form is still accepted: it costs one lookup and may be what other
+        # firmware sends.
+        payload = data.get("payload") or {}
+        items = payload.get("items") or data.get("items") or []
         for item in items:
             device_id = (item.get("deviceId") or "").lower()
             raw_states = item.get("states") or []
@@ -471,10 +499,28 @@ class LocklyMQTTManager:
                 continue
 
             update: dict = {}
-            if "LOCKED_STATUS" in states:
-                update["is_locked"] = states["LOCKED_STATUS"] == "1"
-            if "MAGNET" in states:
-                update["door_sensor_open"] = states["MAGNET"] == "1"
+            for key, raw in states.items():
+                name = key.lower()
+                if name in ("lock", "locked_status"):
+                    value = _as_bool(raw, _LOCKED_TRUE, _LOCKED_FALSE)
+                    field = "is_locked"
+                elif name == "magnet":
+                    value = _as_bool(raw, _MAGNET_TRUE, _MAGNET_FALSE)
+                    field = "door_sensor_open"
+                else:
+                    continue
+                if value is None:
+                    # Say so rather than picking one. A wrong answer about a
+                    # lock or a door is worse than admitting the value is not
+                    # recognised, and this is how the next unseen form of it
+                    # gets reported instead of silently becoming False.
+                    _LOGGER.warning(
+                        "Lockly MQTT: %s sent %s=%r, which is not a value this "
+                        "understands — state left unchanged. Please report it",
+                        device_id, key, raw,
+                    )
+                    continue
+                update[field] = value
 
             if update:
                 updated_data = {

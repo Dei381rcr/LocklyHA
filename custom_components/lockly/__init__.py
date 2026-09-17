@@ -406,10 +406,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
         )
         if status:
             self._learn_from_status(lock, status)
-            if self.data and lock_id in self.data:
-                self.async_set_updated_data(
-                    {**self.data, lock_id: {**self.data[lock_id], **status}}
-                )
+            self._publish_status(lock, status)
         else:
             _LOGGER.debug(
                 "Lockly: pre-command status query failed for %s — reusing last "
@@ -545,6 +542,30 @@ class LocklyCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Lockly: %s rejected the frame sent over MQTT", name)
         return parsed or None
 
+    def _publish_status(self, lock: dict, status: dict) -> None:
+        """Merge a parsed status reading into the coordinator's data.
+
+        Whichever transport carried it, a status response is a real reading and
+        belongs in front of the entities. The MQTT path used to take the nonce
+        and the lock type out of its reply and drop the rest, so on an account
+        where `senddata` is refused — where MQTT is the *only* transport — the
+        lock and door state parsed from every status query was discarded. A door
+        entity could sit stale, or stay unavailable for the life of the run,
+        because nothing else ever proved its sensor was fitted. Found and fixed
+        locally by the reporter of #5, on locks where it did both.
+        """
+        lock_id = lock["ID"]
+        if not self.data or lock_id not in self.data:
+            return
+        self.async_set_updated_data({
+            **self.data,
+            lock_id: {
+                **self.data[lock_id],
+                **status,
+                "wired_door_sensor_connected": lock_id in self._door_sensor_proven,
+            },
+        })
+
     async def _mqtt_nonce(self, lock: dict) -> str | None:
         """Fetch a fresh nonce over MQTT when the senddata status query fails."""
         status = await self._mqtt_exchange(
@@ -556,7 +577,10 @@ class LocklyCoordinator(DataUpdateCoordinator):
             "Lockly: got a status response for %s over MQTT",
             lock.get("na") or lock.get("blename") or lock["ID"],
         )
+        # Order matters: _learn_from_status is what adds this lock to the proven
+        # set when it reports a closed door, and _publish_status reads that set.
         self._learn_from_status(lock, status)
+        self._publish_status(lock, status)
         return status.get("ble_nonce")
 
     async def _try_mqtt_command(

@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.5)
+[![Version](https://img.shields.io/badge/version-0.7.6-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.6)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -25,7 +25,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 | Door sensor state (if fitted) | ✅ Verified open and closed on a wired sensor |
 | Last access / who entered | ✅ Read from the lock; names resolve unless a slot is shared |
 | Guest PIN management (add / remove / list) | 🚧 In progress |
-| Real-time push of external (keypad / app / Matter) changes | ⛔ Needs an FCM token HA cannot obtain, see Known Limitations |
+| Real-time push of external (keypad / app) lock changes | ✅ On WiFi-native locks from 0.7.6 · ⛔ On hub locks — needs an FCM token HA cannot obtain |
 | Multiple locks per account | ✅ |
 | Silent polling — lock does not beep during polls | ⚠️ Needs hub firmware ≥ build 422 |
 | Config flow UI | ✅ |
@@ -220,13 +220,22 @@ one of which reaches Home Assistant:
   HA-initiated lock or unlock is routed to our own `client/<client_id>` topic.
   Verified on a `PGD728FN` behind a `PGH260` hub: lock state is correct
   immediately after every command.
-- **Unsolicited push does not, and probably cannot.** A lock changed at the
-  keypad, in the Lockly app, or over Matter is *not* reflected in HA. The server
-  only pushes external state changes to a client id registered through Lockly's
-  Firebase/AIPN push service, which needs a real FCM token from a genuine app
-  install (`JobService.u()` in the decompiled app). Home Assistant uses an
-  ephemeral client id that is never registered, so the server has no reason to
-  notify it.
+- **Unsolicited push depends on the lock, and 0.7.6 fixed our half of it.** On a
+  hub-attached lock it still does not arrive: the server pushes external changes
+  only to a client id registered through Lockly's Firebase/AIPN service, which
+  needs a real FCM token from a genuine app install (`JobService.u()` in the
+  decompiled app), and Home Assistant's ephemeral client id is never registered.
+
+  WiFi-native locks are different — they send `deviceStateCallback` messages to
+  our own client topic without any of that, and until 0.7.6 this integration
+  discarded every one of them. It looked for the item list at the root of the
+  message, where it is actually under `payload`, and matched the uppercase
+  `LOCKED_STATUS` key, where a Visage sends lowercase `lock` with the value
+  `locked` or `unlocked`. Both shapes came from reading the app and neither had
+  ever been checked against a live message. On these locks a keypad or app
+  unlock now reaches Home Assistant. No `magnet` key has appeared in any
+  captured callback, so the *door* sensor still only updates from a status
+  query.
 
 So state is accurate immediately after you act through HA, and otherwise stale
 until the next HA command — or the next successful poll, on hubs new enough for
@@ -281,16 +290,28 @@ Credentials (email and password) are stored in HA's config entry. The integratio
   Diagnosed from `NewUnlockCmd.getData` rather than from a capture, by the
   reporter of [issue #3](https://github.com/Forcky/LocklyHA/issues/3), and
   confirmed by them on two locks within hours of the release.
-- **Real-time push of external changes does not work, and probably cannot.**
-  State that arrives right after an HA-initiated lock or unlock is correct — that
-  reply is routed to our own MQTT client topic and is verified. But a lock
-  operated at the keypad, in the Lockly app, or over Matter is not reflected in
-  HA until the next HA command or successful poll. The server only pushes
-  unsolicited state to a client id registered through Lockly's Firebase/AIPN push
-  service, which requires a real FCM token from a genuine app install. Home
-  Assistant cannot obtain one, so the server never notifies it of outside
-  changes. This is a different limitation from the broker connection, which works
-  — it is the push *registration* that is closed to a third-party client.
+- **Real-time push of external changes: depends on the lock, and this was wrong
+  until 0.7.6.** State arriving right after an HA-initiated lock or unlock has
+  always been correct — that reply is routed to our own MQTT client topic.
+  Beyond that, earlier versions said flatly that outside changes could never
+  reach Home Assistant, on the grounds that the server only pushes to a client
+  id registered through Lockly's Firebase/AIPN service, which needs an FCM token
+  from a genuine app install. The registration part is still true, and it is
+  still why hub-attached locks do not push.
+
+  But WiFi-native locks do send `deviceStateCallback` messages to our own client
+  topic, and this integration was throwing them away: it looked for the item
+  list at the root of the message where it actually sits under `payload`, and
+  matched an uppercase `LOCKED_STATUS` key where a Visage sends a lowercase
+  `lock` with the value `locked` or `unlocked`. Both came from reading the app
+  rather than a capture, and neither had been checked against a live message.
+  0.7.6 reads both shapes, so on these locks an unlock at the keypad or in the
+  Lockly app now reaches Home Assistant.
+
+  Door state does *not* arrive this way. No `magnet` key has been seen in any
+  captured callback from these locks, so the door sensor still only updates from
+  a status query. Reported and captured on
+  [#5](https://github.com/Forcky/LocklyHA/pull/5).
 - **Silent polling requires hub firmware build ≥ 422** (for major-version-2 hubs). On older firmware `lock/cachedstatus/get` returns `cod=900` and state only updates at startup and after HA commands. Note that Lockly does not necessarily offer an upgrade: a PGH220 on `2.2.04.17` (build 417) reports itself up to date, five builds short of the requirement.
 
 - **Door sensor state is verified, but sensor _presence_ cannot be read from the lock.** Bit 0 of the status byte is the door circuit: `0` = closed, `1` = open. A closed door completes the circuit and an open door breaks it — but a lock with no sensor fitted is an open circuit permanently, so it reads `1` too. That makes `1` ambiguous between "door open" and "no sensor fitted", and this ACK carries no separate presence flag. (The hub's `lock/cachedstatus/get` response does have one, at bit 1, but that endpoint needs newer hub firmware — see above.)
