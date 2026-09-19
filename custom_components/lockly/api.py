@@ -20,6 +20,8 @@ from .capabilities import (
     ACTION_UNLOCK,
     CMD_QUERY_PASSWORDS,
     CMD_QUERY_STATUS,
+    CMD_SET_AUTO_LOCK,
+    CMD_LOCK_SETTINGS,
     DEFAULT_CAPABILITIES,
     LOG_RECORD_CHARS_WIDE,
     PAGING_DATE_UNLIMITED,
@@ -238,6 +240,60 @@ def build_query_status_cmd(master_code: str, uuid: str) -> str:
     )
     return _aes_wrap(raw, derive_aes_key(master_code, uuid))
 
+
+
+def build_query_lock_settings_cmd(master_code: str, uuid: str, nonce: str) -> str:
+    """Build LockSettingsCmd query (0x19 with the app's 0x80 query sentinel)."""
+    enc_mc = encrypt_master_code(master_code, uuid)
+    raw = _assemble_fields(
+        CMD_LOCK_SETTINGS, "1", f"{len(enc_mc) // 2:d}", enc_mc, "80", nonce
+    )
+    return _aes_wrap(raw, derive_aes_key(master_code, uuid))
+
+
+def build_set_auto_lock_cmd(
+    master_code: str,
+    uuid: str,
+    auto_lock_time: int,
+    check_door_sensor: bool,
+    nonce: str,
+) -> str:
+    """Build SetAutoLockCmd (0x12); time=1/flag=0 is native Automation mode."""
+    enc_mc = encrypt_master_code(master_code, uuid)
+    raw = _assemble_fields(
+        CMD_SET_AUTO_LOCK,
+        f"{len(enc_mc) // 2:d}",
+        enc_mc,
+        f"{auto_lock_time:x}",
+        "1" if check_door_sensor else "0",
+        nonce,
+    )
+    return _aes_wrap(raw, derive_aes_key(master_code, uuid), encrypt_type=0x05)
+
+
+def build_set_lock_settings_cmd(
+    master_code: str, uuid: str, settings_byte: int, nonce: str
+) -> str:
+    """Build LockSettingsCmd write (0x19), preserving the caller's settings byte."""
+    if not 0 <= settings_byte <= 0xFF:
+        raise ValueError("settings_byte must be between 0x00 and 0xFF")
+    enc_mc = encrypt_master_code(master_code, uuid)
+    raw = _assemble_fields(
+        CMD_LOCK_SETTINGS,
+        "1",
+        f"{len(enc_mc) // 2:d}",
+        enc_mc,
+        f"{settings_byte:02x}",
+        nonce,
+    )
+    return _aes_wrap(raw, derive_aes_key(master_code, uuid), encrypt_type=0x05)
+
+
+def enable_auto_lock_in_settings(settings_byte: int) -> int:
+    """Enable the physical Auto-Lock switch (bit 3) without changing other settings."""
+    if not 0 <= settings_byte <= 0xFF:
+        raise ValueError("settings_byte must be between 0x00 and 0xFF")
+    return settings_byte | 0x08
 
 def _build_cmd_hex(
     master_code: str,
@@ -472,6 +528,60 @@ def parse_pwd_list_ack(
         _LOGGER.exception("Failed to parse password list ACK: %s", ack_hex[:60])
         return None
 
+
+
+def parse_lock_settings_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
+    """Parse a 0x19 settings-query ACK and expose the physical switch byte."""
+    h = ack_hex.upper()
+    try:
+        payload = bytes.fromhex(h[18:-2])
+        if not payload or len(payload) % 16:
+            return {}
+        d = AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(payload).hex()
+        if len(d) < 2:
+            return {}
+        settings = int(d[0:2], 16)
+        return {
+            "lock_settings_byte": settings,
+            "pin_crazy": bool(settings & 0x01),
+            "key_tone": bool(settings & 0x02),
+            "alarm_mode_switch": bool(settings & 0x04),
+            "auto_lock_switch": bool(settings & 0x08),
+            "alarm_status": bool(settings & 0x10),
+        }
+    except Exception:
+        _LOGGER.exception("Failed to parse lock-settings ACK: %s", ack_hex[:60])
+        return {}
+
+
+def parse_set_auto_lock_ack(ack_hex: str, master_code: str, uuid: str) -> bool:
+    """Return True when SetAutoLockCmd (0x12) reports success (status byte 0)."""
+    h = ack_hex.upper()
+    try:
+        payload = bytes.fromhex(h[16:-2])
+        if not payload or len(payload) % 16:
+            return False
+        d = AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(payload)
+        return bool(d) and d[0] == 0
+    except Exception:
+        _LOGGER.exception("Failed to parse set-auto-lock ACK: %s", ack_hex[:60])
+        return False
+
+
+def parse_set_lock_settings_ack(
+    ack_hex: str, master_code: str, uuid: str, requested_settings: int
+) -> bool:
+    """Return True when a 0x19 write echoes the requested settings byte."""
+    h = ack_hex.upper()
+    try:
+        payload = bytes.fromhex(h[18:-2])
+        if not payload or len(payload) % 16:
+            return False
+        d = AES.new(derive_aes_key(master_code, uuid), AES.MODE_ECB).decrypt(payload)
+        return bool(d) and d[0] == requested_settings
+    except Exception:
+        _LOGGER.exception("Failed to parse set-lock-settings ACK: %s", ack_hex[:60])
+        return False
 
 def parse_ack(ack_hex: str, master_code: str, uuid: str) -> dict[str, Any]:
     """Parse ACK field from senddata response.

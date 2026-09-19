@@ -31,11 +31,18 @@ from .api import (
     build_lock_cmd,
     build_query_pwd_cmd,
     build_query_status_cmd,
+    build_query_lock_settings_cmd,
+    build_set_auto_lock_cmd,
+    build_set_lock_settings_cmd,
+    enable_auto_lock_in_settings,
     build_unlock_cmd,
     api_unlock,
     dedupe_credentials,
     describe_open_type,
     parse_ack,
+    parse_lock_settings_ack,
+    parse_set_auto_lock_ack,
+    parse_set_lock_settings_ack,
     parse_pwd_list_ack,
     host_password_from,
     is_transient_cod,
@@ -102,7 +109,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # The services are domain-wide, so only tear them down with the last
         # entry — otherwise unloading one account removes them for the others.
         if not hass.data[DOMAIN]:
-            for svc in (SERVICE_LIST_GUESTS, SERVICE_ADD_GUEST, SERVICE_DELETE_GUEST):
+            for svc in (SERVICE_LIST_GUESTS, SERVICE_ADD_GUEST, SERVICE_DELETE_GUEST, "enable_native_auto_lock"):
                 hass.services.async_remove(DOMAIN, svc)
             hass.data.pop(DOMAIN, None)
     return unloaded
@@ -520,18 +527,16 @@ class LocklyCoordinator(DataUpdateCoordinator):
         )
         return False
 
-    async def _mqtt_exchange(self, lock: dict, frame_hex: str) -> dict | None:
-        """Relay a frame to the lock over MQTT and parse whatever it answers.
-
-        The reply carries the lock's own ACK, so this serves any frame we build,
-        which is what makes the MQTT path usable for accounts where `senddata`
-        refuses everything: the nonce and the host password can be fetched the
-        same way as the command itself.
-        """
+    async def _mqtt_exchange_raw(self, lock: dict, frame_hex: str) -> str | None:
+        """Relay a frame over MQTT and return the lock's unparsed ACK."""
         mqtt = getattr(self, "_mqtt_manager", None)
         if mqtt is None or not mqtt.connected:
             return None
-        ack = await mqtt.async_exchange_frame(lock["ID"], frame_hex)
+        return await mqtt.async_exchange_frame(lock["ID"], frame_hex)
+
+    async def _mqtt_exchange(self, lock: dict, frame_hex: str) -> dict | None:
+        """Relay a status-compatible frame to the lock over MQTT and parse it."""
+        ack = await self._mqtt_exchange_raw(lock, frame_hex)
         if not ack:
             return None
         name = lock.get("na") or lock.get("blename") or lock["ID"]
@@ -582,6 +587,53 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._learn_from_status(lock, status)
         self._publish_status(lock, status)
         return status.get("ble_nonce")
+
+    async def async_enable_native_auto_lock(self, lock_id: str) -> bool:
+        """Enable Lockly's lock-resident Auto-Detection (Automation) mode.
+
+        The Android app writes 0x12 with time=1/check-door=0, then enables the
+        Auto-Lock master bit through 0x19. Both writes reuse one fresh nonce.
+        """
+        lock = self._get_lock(lock_id)
+        if lock is None:
+            return False
+        mc, uuid = str(lock["mc"]), lock["ID"]
+        name = lock.get("na") or lock.get("blename") or uuid
+
+        # Wi-Fi-native locks need MQTT for this path. A fresh status query gives
+        # the nonce that the official app reuses for both following writes.
+        nonce = await self._mqtt_nonce(lock)
+        if not nonce:
+            _LOGGER.warning("Lockly: could not obtain a fresh nonce for %s", name)
+            return False
+
+        query_ack = await self._mqtt_exchange_raw(
+            lock, build_query_lock_settings_cmd(mc, uuid, nonce)
+        )
+        settings = parse_lock_settings_ack(query_ack, mc, uuid) if query_ack else {}
+        if "lock_settings_byte" not in settings:
+            _LOGGER.warning("Lockly: could not read physical settings for %s", name)
+            return False
+        new_settings = enable_auto_lock_in_settings(settings["lock_settings_byte"])
+
+        auto_ack = await self._mqtt_exchange_raw(
+            lock, build_set_auto_lock_cmd(mc, uuid, 1, False, nonce)
+        )
+        if not auto_ack or not parse_set_auto_lock_ack(auto_ack, mc, uuid):
+            _LOGGER.warning("Lockly: native Automation write was rejected by %s", name)
+            return False
+
+        settings_ack = await self._mqtt_exchange_raw(
+            lock, build_set_lock_settings_cmd(mc, uuid, new_settings, nonce)
+        )
+        if not settings_ack or not parse_set_lock_settings_ack(
+            settings_ack, mc, uuid, new_settings
+        ):
+            _LOGGER.warning("Lockly: Auto-Lock settings write was rejected by %s", name)
+            return False
+
+        _LOGGER.info("Lockly: enabled native Auto-Detection locking for %s", name)
+        return True
 
     async def _try_mqtt_command(
         self, lock: dict, nonce: str | None, host_pwd: str | None, *, unlock: bool
@@ -1161,6 +1213,15 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
             ),
         })
 
+    async def handle_enable_native_auto_lock(call) -> None:
+        """Enable the lock's own close-door-immediately locking behavior."""
+        lock_id = call.data["lock_id"]
+        ok = await coordinator.async_enable_native_auto_lock(lock_id)
+        hass.bus.async_fire("lockly_native_auto_lock_enabled", {
+            "lock_id": lock_id,
+            "success": ok,
+        })
+
     async def handle_read_access_log(call) -> None:
         """Read a lock's access log on demand.
 
@@ -1193,6 +1254,7 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         for lock in locks:
             await coordinator.async_read_signal(lock)
 
+    hass.services.async_register(DOMAIN, "enable_native_auto_lock", handle_enable_native_auto_lock, schema=_LIST_GUESTS_SCHEMA)
     hass.services.async_register(DOMAIN, "read_signal", handle_read_signal, schema=_READ_SIGNAL_SCHEMA)
     hass.services.async_register(DOMAIN, "read_access_log", handle_read_access_log, schema=_LIST_GUESTS_SCHEMA)
     hass.services.async_register(DOMAIN, "query_passwords", handle_query_passwords, schema=_LIST_GUESTS_SCHEMA)

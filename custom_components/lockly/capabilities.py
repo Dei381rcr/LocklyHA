@@ -24,6 +24,8 @@ from dataclasses import dataclass
 # ── Command codes ─────────────────────────────────────────────────────────────
 
 CMD_QUERY_STATUS = "1E"     # MessageManage.CODE_NEW_QUERY_LOCK_STATUS
+CMD_SET_AUTO_LOCK = "12"     # SetAutoLockCmd — native Auto-Detection/Automation mode
+CMD_LOCK_SETTINGS = "19"     # LockSettingsCmd — query/write physical switch settings
 CMD_UNLOCK = "22"           # NewUnlockCmd, standard AES path
 CMD_UNLOCK_82 = "52"        # NewUnlockCmd, isSupport82Cmd path
 CMD_QUERY_PASSWORDS = "93"  # QueryPwd147Cmd — paginated credential list
