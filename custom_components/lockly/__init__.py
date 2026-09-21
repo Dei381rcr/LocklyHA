@@ -34,6 +34,7 @@ from .api import (
     build_query_lock_settings_cmd,
     build_set_auto_lock_cmd,
     build_set_lock_settings_cmd,
+    disable_auto_lock_in_settings,
     enable_auto_lock_in_settings,
     build_unlock_cmd,
     api_unlock,
@@ -63,6 +64,8 @@ from .const import (
     SENDDATA_RETRY_DELAY_SECONDS,
     SERVICE_ADD_GUEST,
     SERVICE_DELETE_GUEST,
+    SERVICE_DISABLE_NATIVE_AUTO_LOCK,
+    SERVICE_ENABLE_NATIVE_AUTO_LOCK,
     SERVICE_LIST_GUESTS,
 )
 
@@ -109,7 +112,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # The services are domain-wide, so only tear them down with the last
         # entry — otherwise unloading one account removes them for the others.
         if not hass.data[DOMAIN]:
-            for svc in (SERVICE_LIST_GUESTS, SERVICE_ADD_GUEST, SERVICE_DELETE_GUEST, "enable_native_auto_lock"):
+            for svc in (
+                SERVICE_LIST_GUESTS,
+                SERVICE_ADD_GUEST,
+                SERVICE_DELETE_GUEST,
+                SERVICE_ENABLE_NATIVE_AUTO_LOCK,
+                SERVICE_DISABLE_NATIVE_AUTO_LOCK,
+            ):
                 hass.services.async_remove(DOMAIN, svc)
             hass.data.pop(DOMAIN, None)
     return unloaded
@@ -588,23 +597,30 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._publish_status(lock, status)
         return status.get("ble_nonce")
 
-    async def async_enable_native_auto_lock(self, lock_id: str) -> bool:
-        """Enable Lockly's lock-resident Auto-Detection (Automation) mode.
-
-        The Android app writes 0x12 with time=1/check-door=0, then enables the
-        Auto-Lock master bit through 0x19. Both writes reuse one fresh nonce.
-        """
+    async def _async_set_native_auto_lock(self, lock_id: str, enabled: bool) -> bool:
+        """Set Lockly's native Auto-Lock mode over the MQTT device channel."""
         lock = self._get_lock(lock_id)
         if lock is None:
             return False
         mc, uuid = str(lock["mc"]), lock["ID"]
         name = lock.get("na") or lock.get("blename") or uuid
 
-        # Wi-Fi-native locks need MQTT for this path. A fresh status query gives
-        # the nonce that the official app reuses for both following writes.
+        mqtt = getattr(self, "_mqtt_manager", None)
+        if mqtt is None or not mqtt.connected:
+            _LOGGER.warning("Lockly: native Auto-Lock requires MQTT for %s", name)
+            return False
+
         nonce = await self._mqtt_nonce(lock)
         if not nonce:
             _LOGGER.warning("Lockly: could not obtain a fresh nonce for %s", name)
+            return False
+
+        caps = self._caps_for(lock)
+        if not caps.supports_auto_detection_auto_lock:
+            _LOGGER.warning(
+                "Lockly: native Auto-Detection is not verified for %s (type %d)",
+                name, caps.lock_type,
+            )
             return False
 
         query_ack = await self._mqtt_exchange_raw(
@@ -614,13 +630,26 @@ class LocklyCoordinator(DataUpdateCoordinator):
         if "lock_settings_byte" not in settings:
             _LOGGER.warning("Lockly: could not read physical settings for %s", name)
             return False
-        new_settings = enable_auto_lock_in_settings(settings["lock_settings_byte"])
+
+        current = settings["lock_settings_byte"]
+        new_settings = (
+            enable_auto_lock_in_settings(current)
+            if enabled else disable_auto_lock_in_settings(current)
+        )
 
         auto_ack = await self._mqtt_exchange_raw(
-            lock, build_set_auto_lock_cmd(mc, uuid, 1, False, nonce)
+            lock,
+            build_set_auto_lock_cmd(
+                mc,
+                uuid,
+                1 if enabled else 0,
+                False,
+                nonce,
+                include_check_door_sensor=caps.supports_detection_door_sensor_when_locked,
+            ),
         )
         if not auto_ack or not parse_set_auto_lock_ack(auto_ack, mc, uuid):
-            _LOGGER.warning("Lockly: native Automation write was rejected by %s", name)
+            _LOGGER.warning("Lockly: native Auto-Lock write was rejected by %s", name)
             return False
 
         settings_ack = await self._mqtt_exchange_raw(
@@ -632,9 +661,20 @@ class LocklyCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Lockly: Auto-Lock settings write was rejected by %s", name)
             return False
 
-        _LOGGER.info("Lockly: enabled native Auto-Detection locking for %s", name)
+        _LOGGER.info(
+            "Lockly: %s native Auto-Detection locking for %s "
+            "(settings 0x%02X -> 0x%02X)",
+            "enabled" if enabled else "disabled", name, current, new_settings,
+        )
         return True
 
+    async def async_enable_native_auto_lock(self, lock_id: str) -> bool:
+        """Enable lock-resident Auto-Detection mode."""
+        return await self._async_set_native_auto_lock(lock_id, True)
+
+    async def async_disable_native_auto_lock(self, lock_id: str) -> bool:
+        """Disable lock-resident Auto-Lock."""
+        return await self._async_set_native_auto_lock(lock_id, False)
     async def _try_mqtt_command(
         self, lock: dict, nonce: str | None, host_pwd: str | None, *, unlock: bool
     ) -> bool:
@@ -1222,6 +1262,15 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
             "success": ok,
         })
 
+    async def handle_disable_native_auto_lock(call) -> None:
+        """Disable the lock's native Auto-Lock behavior."""
+        lock_id = call.data["lock_id"]
+        ok = await coordinator.async_disable_native_auto_lock(lock_id)
+        hass.bus.async_fire(
+            "lockly_native_auto_lock_disabled",
+            {"lock_id": lock_id, "success": ok},
+        )
+
     async def handle_read_access_log(call) -> None:
         """Read a lock's access log on demand.
 
@@ -1254,7 +1303,18 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
         for lock in locks:
             await coordinator.async_read_signal(lock)
 
-    hass.services.async_register(DOMAIN, "enable_native_auto_lock", handle_enable_native_auto_lock, schema=_LIST_GUESTS_SCHEMA)
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ENABLE_NATIVE_AUTO_LOCK,
+        handle_enable_native_auto_lock,
+        schema=_LIST_GUESTS_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DISABLE_NATIVE_AUTO_LOCK,
+        handle_disable_native_auto_lock,
+        schema=_LIST_GUESTS_SCHEMA,
+    )
     hass.services.async_register(DOMAIN, "read_signal", handle_read_signal, schema=_READ_SIGNAL_SCHEMA)
     hass.services.async_register(DOMAIN, "read_access_log", handle_read_access_log, schema=_LIST_GUESTS_SCHEMA)
     hass.services.async_register(DOMAIN, "query_passwords", handle_query_passwords, schema=_LIST_GUESTS_SCHEMA)

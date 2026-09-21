@@ -5,6 +5,7 @@ enable_native_auto_lock:
     retracted while the door is open and locks immediately when the lock's
     magnetic door sensor detects that the door has closed. This configures the
     lock itself; Home Assistant does not poll to implement the behavior.
+    Currently supported over the MQTT device channel on verified hardware.
   fields:
     lock_id:
       name: Lock ID
@@ -13,8 +14,20 @@ enable_native_auto_lock:
       selector:
         text:
 
-list_guests:
-  name: List Guests
+disable_native_auto_lock:
+  name: Disable native Auto-Lock
+  description: >
+    Disables the lock's native Auto-Lock behavior. Currently supported over
+    the MQTT device channel on verified hardware.
+  fields:
+    lock_id:
+      name: Lock ID
+      description: The Lockly lock ID (device UUID) to configure.
+      required: true
+      selector:
+        text:
+
+list_guests:  name: List Guests
   description: >
     Retrieves the guest list for a Lockly lock and fires a lockly_guest_list
     event with the results.

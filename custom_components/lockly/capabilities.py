@@ -204,6 +204,16 @@ class LockCapabilities:
     firmware: str = ""
 
     @property
+    def supports_auto_detection_auto_lock(self) -> bool:
+        """Whether native Auto-Detection (time=1) is verified for this model."""
+        return self.lock_type == 105
+
+    @property
+    def supports_detection_door_sensor_when_locked(self) -> bool:
+        """Whether SetAutoLockCmd includes its conditional door-sensor byte."""
+        return self.lock_type == 105
+
+    @property
     def supports_82_cmd(self) -> bool:
         """isSupport82Cmd(): lock uses the 0x52 command set."""
         return self.lock_type in _SUPPORTS_82_CMD

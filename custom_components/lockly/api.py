@@ -257,18 +257,23 @@ def build_set_auto_lock_cmd(
     auto_lock_time: int,
     check_door_sensor: bool,
     nonce: str,
+    *,
+    include_check_door_sensor: bool = True,
 ) -> str:
-    """Build SetAutoLockCmd (0x12); time=1/flag=0 is native Automation mode."""
+    """Build SetAutoLockCmd (0x12), whose time field is unsigned LE16."""
+    if not 0 <= auto_lock_time <= 0xFFFF:
+        raise ValueError("auto_lock_time must be between 0 and 65535")
     enc_mc = encrypt_master_code(master_code, uuid)
-    raw = _assemble_fields(
+    fields = [
         CMD_SET_AUTO_LOCK,
         f"{len(enc_mc) // 2:d}",
         enc_mc,
-        f"{auto_lock_time:x}",
-        "1" if check_door_sensor else "0",
-        nonce,
-    )
-    return _aes_wrap(raw, derive_aes_key(master_code, uuid), encrypt_type=0x05)
+        auto_lock_time.to_bytes(2, "little").hex(),
+    ]
+    if include_check_door_sensor:
+        fields.append("1" if check_door_sensor else "0")
+    fields.append(nonce)
+    return _aes_wrap(_assemble_fields(*fields), derive_aes_key(master_code, uuid))
 
 
 def build_set_lock_settings_cmd(
@@ -289,11 +294,22 @@ def build_set_lock_settings_cmd(
     return _aes_wrap(raw, derive_aes_key(master_code, uuid), encrypt_type=0x05)
 
 
-def enable_auto_lock_in_settings(settings_byte: int) -> int:
-    """Enable the physical Auto-Lock switch (bit 3) without changing other settings."""
+def set_auto_lock_in_settings(settings_byte: int, enabled: bool) -> int:
+    """Set Auto-Lock bit 3 using LockSettingBean.getOtherSettingsHex semantics."""
     if not 0 <= settings_byte <= 0xFF:
         raise ValueError("settings_byte must be between 0x00 and 0xFF")
-    return settings_byte | 0x08
+    low = settings_byte & 0x07
+    return low | (0x08 if enabled else 0x00)
+
+
+def enable_auto_lock_in_settings(settings_byte: int) -> int:
+    """Enable the physical Auto-Lock switch."""
+    return set_auto_lock_in_settings(settings_byte, True)
+
+
+def disable_auto_lock_in_settings(settings_byte: int) -> int:
+    """Disable the physical Auto-Lock switch."""
+    return set_auto_lock_in_settings(settings_byte, False)
 
 def _build_cmd_hex(
     master_code: str,
