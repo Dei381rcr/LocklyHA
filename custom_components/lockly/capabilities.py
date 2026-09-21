@@ -120,7 +120,14 @@ _SUPPORTS_82_CMD = frozenset({
     132,  # PGD7AWG25
     133,  # PGD7YWG25
 })
-
+# Lockly app predicate for SetAutoLockCmd's conditional door-sensor byte.
+_SUPPORTS_DETECTION_DOOR_SENSOR_WHEN_LOCKED = frozenset({
+    102,  # PGK7SWH
+    103,  # PGK7SWHK
+    104,  # PGK728WHK
+    105,  # PGK728WRHK
+    117,  # PGK798HK
+})
 # isSupport82Cmd() members gated on a firmware check we do not implement
 # (DeviceVersionManager.m57412m / m57414o).  Treated as NOT supporting 0x52 so
 # we fall back to the widely-working 0x22 frame rather than guessing.
@@ -211,8 +218,7 @@ class LockCapabilities:
     @property
     def supports_detection_door_sensor_when_locked(self) -> bool:
         """Whether SetAutoLockCmd includes its conditional door-sensor byte."""
-        return self.lock_type == 105
-
+        return self.lock_type in _SUPPORTS_DETECTION_DOOR_SENSOR_WHEN_LOCKED
     @property
     def supports_82_cmd(self) -> bool:
         """isSupport82Cmd(): lock uses the 0x52 command set."""
