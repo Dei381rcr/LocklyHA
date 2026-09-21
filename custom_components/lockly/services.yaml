@@ -27,7 +27,8 @@ disable_native_auto_lock:
       selector:
         text:
 
-list_guests:  name: List Guests
+list_guests:
+  name: List Guests
   description: >
     Retrieves the guest list for a Lockly lock and fires a lockly_guest_list
     event with the results.
