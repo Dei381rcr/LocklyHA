@@ -66,6 +66,8 @@ MATTER_HUB_PREFIX = "PGH260"
 SERVICE_LIST_GUESTS  = "list_guests"
 SERVICE_ADD_GUEST    = "add_guest"
 SERVICE_DELETE_GUEST = "delete_guest"
+SERVICE_ENABLE_NATIVE_AUTO_LOCK = "enable_native_auto_lock"
+SERVICE_DISABLE_NATIVE_AUTO_LOCK = "disable_native_auto_lock"
 
 BATTERY_MIN_V = 4.5
 BATTERY_MAX_V = 6.0

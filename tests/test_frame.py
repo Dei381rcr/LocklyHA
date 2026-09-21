@@ -17,6 +17,11 @@ from Crypto.Cipher import AES
 
 from custom_components.lockly.api import (
     build_lock_cmd,
+    build_query_lock_settings_cmd,
+    build_set_auto_lock_cmd,
+    build_set_lock_settings_cmd,
+    disable_auto_lock_in_settings,
+    enable_auto_lock_in_settings,
     build_paging_log_cmd,
     build_query_pwd_cmd,
     build_query_status_cmd,
@@ -228,6 +233,29 @@ def _wrap_response(plaintext_hex: str, cmd_type: str = "0A93") -> str:
     )
     return (body + bytes([crc8_lockly(body)])).hex().upper()
 
+
+def test_native_auto_lock_frames() -> None:
+    """Regression coverage for the 0x12 and 0x19 review findings."""
+    print("native Auto-Lock frames")
+    enc_mc = encrypt_master_code(MC, UUID)
+
+    automation = decrypt_frame(
+        build_set_auto_lock_cmd(MC, UUID, 1, False, NONCE), MC, UUID
+    )
+    expected = "12" + "08" + enc_mc + "0100" + "00" + NONCE
+    check("Automation time is LE16", automation[:len(expected)], expected)
+
+    no_flag = decrypt_frame(
+        build_set_auto_lock_cmd(
+            MC, UUID, 1, False, NONCE, include_check_door_sensor=False
+        ),
+        MC, UUID,
+    )
+    expected = "12" + "08" + enc_mc + "0100" + NONCE
+    check("conditional sensor flag can be omitted", no_flag[:len(expected)], expected)
+
+    check("enable normalizes upper nibble", enable_auto_lock_in_settings(0xF2), 0x0A)
+    check("disable normalizes upper nibble", disable_auto_lock_in_settings(0xFA), 0x02)
 
 def test_query_pwd_frame() -> None:
     """The 0x93 credential-list request layout."""
@@ -545,6 +573,7 @@ def main() -> int:
         test_status_frame_unchanged,
         test_ack_parse_real_capture,
         test_capabilities,
+        test_native_auto_lock_frames,
         test_query_pwd_frame,
         test_pwd_list_parsing,
         test_pwd_list_overrun_returns_none,

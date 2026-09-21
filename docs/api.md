@@ -1514,3 +1514,26 @@ A success carries an AES-encrypted status block instead, and its first byte is
 > request and the hub relayed it. Always parse the ACK: a rejection is a short
 > frame, a success is a full AES block. Reporting `cod=200` as success is how a
 > silently-failing unlock can look like a working one.
+
+---
+
+## Native Auto-Lock / Auto-Detection
+
+Lockly's Automation mode is lock-resident behavior. `0x12` carries Auto-Lock
+time as a two-byte little-endian field: `0100` selects Auto-Detection and
+`0000` disables Auto-Lock. The following check-door-sensor byte exists only on
+models whose capability predicate supports it.
+
+Physical settings use `0x19`; `0x80` is the query sentinel and bit 3 (`0x08`)
+is the Auto-Lock master switch. The app serializes only the low nibble, forcing
+bits 4-7 to zero on a settings write.
+
+The fresh nonce is reused for the `0x19` query and the two following writes.
+The integration exposes `lockly.enable_native_auto_lock` and
+`lockly.disable_native_auto_lock`. This implementation is currently MQTT-only
+and conservatively capability-gated to hardware that has been validated.
+
+PGK728WRHK/type 105 was validated on firmware 3.00.24 and 1.14.31. A physical
+OFF-to-ON test read settings `0x02`, enabled Automation, and independently read
+back `0x0A`. With the door left open for more than 30 seconds the deadbolt
+remained retracted; closing the door then locked immediately.

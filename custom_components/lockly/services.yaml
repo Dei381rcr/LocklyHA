@@ -1,3 +1,32 @@
+enable_native_auto_lock:
+  name: Enable native Auto-Detection locking
+  description: >
+    Enables Lockly's lock-resident Automation mode. The deadbolt remains
+    retracted while the door is open and locks immediately when the lock's
+    magnetic door sensor detects that the door has closed. This configures the
+    lock itself; Home Assistant does not poll to implement the behavior.
+    Currently supported over the MQTT device channel on verified hardware.
+  fields:
+    lock_id:
+      name: Lock ID
+      description: The Lockly lock ID (device UUID) to configure.
+      required: true
+      selector:
+        text:
+
+disable_native_auto_lock:
+  name: Disable native Auto-Lock
+  description: >
+    Disables the lock's native Auto-Lock behavior. Currently supported over
+    the MQTT device channel on verified hardware.
+  fields:
+    lock_id:
+      name: Lock ID
+      description: The Lockly lock ID (device UUID) to configure.
+      required: true
+      selector:
+        text:
+
 list_guests:
   name: List Guests
   description: >
