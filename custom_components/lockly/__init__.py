@@ -675,7 +675,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
     async def async_disable_native_auto_lock(self, lock_id: str) -> bool:
         """Disable lock-resident Auto-Lock."""
         return await self._async_set_native_auto_lock(lock_id, False)
-        
+    
     async def _try_mqtt_command(
         self, lock: dict, nonce: str | None, host_pwd: str | None, *, unlock: bool
     ) -> bool:
