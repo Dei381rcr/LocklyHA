@@ -127,7 +127,13 @@ _SUPPORTS_DETECTION_DOOR_SENSOR_WHEN_LOCKED = frozenset({
     104,  # PGK728WHK
     105,  # PGK728WRHK
     117,  # PGK798HK
+    124,  # PGD728FG25
+    125,  # PGD728FNG25
+    128,  # PGK728WKL
+    132,  # PGD7AWG25
+    133,  # PGD7YWG25
 })
+
 # isSupport82Cmd() members gated on a firmware check we do not implement
 # (DeviceVersionManager.m57412m / m57414o).  Treated as NOT supporting 0x52 so
 # we fall back to the widely-working 0x22 frame rather than guessing.
@@ -219,6 +225,7 @@ class LockCapabilities:
     def supports_detection_door_sensor_when_locked(self) -> bool:
         """Whether SetAutoLockCmd includes its conditional door-sensor byte."""
         return self.lock_type in _SUPPORTS_DETECTION_DOOR_SENSOR_WHEN_LOCKED
+    
     @property
     def supports_82_cmd(self) -> bool:
         """isSupport82Cmd(): lock uses the 0x52 command set."""
