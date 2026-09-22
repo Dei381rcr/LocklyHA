@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io/)
 [![GitHub Release](https://img.shields.io/github/v/release/Forcky/LocklyHA)](https://github.com/Forcky/LocklyHA/releases)
-[![Version](https://img.shields.io/badge/version-0.7.7-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.7)
+[![Version](https://img.shields.io/badge/version-0.7.8-blue.svg)](https://github.com/Forcky/LocklyHA/releases/tag/v0.7.8)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Control and monitor your **Lockly smart locks** from Home Assistant. This integration communicates with the Lockly cloud API using the same protocol as the official Lockly mobile app.
@@ -20,6 +20,7 @@ Control and monitor your **Lockly smart locks** from Home Assistant. This integr
 | Lock from HA | 🚧 Implemented; hard to verify on auto-locking locks |
 | In-progress state while a command runs | ✅ From 0.7.7 |
 | Commands over MQTT when senddata is refused | ✅ Verified on PGD728FN + PGH260 hub (cod=930 accounts) |
+| Native Auto-Lock (Automation), set on the lock | ✅ From 0.7.8 on PGK728WRHK; MQTT-only |
 | Hubless WiFi-native locks | ✅ Verified from 0.7.4 on two PGK728WRHK (Lockly Visage), firmware 1.14.31 and 3.00.24 |
 | Lock state (locked / unlocked) | ✅ At startup and after HA commands |
 | Battery low warning | ✅ |
@@ -106,6 +107,29 @@ Three HA services are available for managing time-limited guest PIN codes. Call 
 Results are returned as HA bus events: `lockly_guest_list`, `lockly_guest_added`, `lockly_guest_deleted`. Listen for these in **Developer Tools → Events**.
 
 `lock_id` is the device UUID (visible on the lock's device page in HA under *Identifiers*).
+
+### Native Auto-Lock (Automation)
+
+Lockly's Automation mode is executed by the lock itself: the deadbolt stays
+retracted while the door is open and throws the moment the lock's magnetic
+sensor detects the door closing. Home Assistant does not poll a door sensor or
+run a timer to make this happen — it only writes the setting.
+
+| Service | Required fields | Optional fields |
+|---|---|---|
+| `lockly.enable_native_auto_lock` | `lock_id` | — |
+| `lockly.disable_native_auto_lock` | `lock_id` | — |
+
+Results are returned as the bus events `lockly_native_auto_lock_enabled` and
+`lockly_native_auto_lock_disabled`, each carrying `lock_id` and `success`.
+
+> **Two limits worth knowing.** This path is MQTT-only, so a hub-relayed lock
+> will refuse it and log that it could not get a nonce. It is also gated to
+> hardware the behaviour has been verified on — currently PGK728WRHK (type 105)
+> — and other models are declined rather than guessed at.
+
+Enabling while the door is already closed and unlocked does **not** lock it.
+Automation acts on the next door-close transition, not on the current state.
 
 ---
 
