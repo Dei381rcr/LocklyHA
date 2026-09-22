@@ -7,7 +7,7 @@ already-resolved future would raise InvalidStateError.
 import asyncio, base64, json, sys, threading
 sys.path.insert(0, "/config/lockly_test")  # set by the deploy step; see AGENTS.md
 
-from custom_components.lockly.mqtt import LocklyMQTTManager
+from custom_components.lockly.mqtt import LocklyMQTTManager, _truncate
 
 ACK = "A1B2C3D429000A1E95A9B99DCBC5945E531B5EB4A643BA93BE5696D79B9791D9392AC7509E8BB800A2"
 fails = []
@@ -146,6 +146,16 @@ async def main():
     m._coordinator = coord
     await m._process_device_state(state_msg("payload", "2D0023", {"lock": "unlocked"}))
     check("uppercase id matches our lowercase key", coord.data["2d0023"]["is_locked"], False)
+
+    # The debug log is how every protocol question on this repo has been
+    # answered, so a payload that fits must arrive whole.
+    print("debug log truncation")
+    short = json.dumps({"header": {"name": "deviceStateCallback"}, "payload": {"items": []}})
+    check("a callback-sized payload is untouched", _truncate(short.encode()), short)
+    long_payload = ("x" * 2500).encode()
+    out = _truncate(long_payload)
+    check("an oversized payload is cut at the limit", out.startswith("x" * 2000), True)
+    check("and says how much it dropped", out.endswith("[500 more characters]"), True)
 
     print()
     print(f"{len(fails)} failure(s): {fails}" if fails else "all exchange checks passed")

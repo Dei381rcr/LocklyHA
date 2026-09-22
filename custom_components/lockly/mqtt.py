@@ -56,6 +56,24 @@ def _as_bool(raw: object, true_set: frozenset, false_set: frozenset) -> bool | N
         return False
     return None
 
+
+# How much of a raw broker message the debug log keeps. This was 400, which cut
+# every deviceStateCallback off mid-payload — the reporter on #2 sent a log to
+# answer a question about the state keys and the state keys were the part that
+# had been trimmed. A callback runs to roughly 600 characters and a command
+# reply with its base64 frame to about 900, so 2000 keeps both whole with room
+# to spare, and a message longer than that says how much it dropped rather than
+# ending mid-word and looking like the message itself was malformed.
+_LOG_PAYLOAD_LIMIT = 2000
+
+
+def _truncate(payload: bytes) -> str:
+    """Decode a raw payload for the debug log, saying so if it is shortened."""
+    text = payload.decode(errors="replace")
+    if len(text) <= _LOG_PAYLOAD_LIMIT:
+        return text
+    return f"{text[:_LOG_PAYLOAD_LIMIT]}… [{len(text) - _LOG_PAYLOAD_LIMIT} more characters]"
+
 # How long to wait for the lock to answer a frame relayed over the broker.
 # Observed round trips are under two seconds; this allows for a sleeping lock.
 _RESPONSE_TIMEOUT = 20.0
@@ -207,7 +225,7 @@ class LocklyMQTTManager:
                 _LOGGER.debug(
                     "Lockly MQTT raw: topic=%s payload=%s",
                     msg.topic,
-                    msg.payload[:400].decode(errors="replace"),
+                    _truncate(msg.payload),
                 )
                 name = (data.get("header") or {}).get("name")
                 if name == "deviceStateCallback":
