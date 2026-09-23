@@ -677,7 +677,11 @@ class LocklyCoordinator(DataUpdateCoordinator):
         return await self._async_set_native_auto_lock(lock_id, False)
 
     async def async_refresh_door_state(self, lock_id: str) -> bool | None:
-        """Query the lock and return its freshly measured door state."""
+        """Query the lock and return its freshly measured door state.
+
+        This sends a real BLE status frame and wakes the lock, so it belongs in
+        an on-demand service and must not be used on a frequent timer.
+        """
         lock = self._get_lock(lock_id)
         if lock is None:
             return None
@@ -695,6 +699,7 @@ class LocklyCoordinator(DataUpdateCoordinator):
         self._learn_from_status(lock, status)
         self._publish_status(lock, status)
         return status.get("door_sensor_open")
+
     async def _try_mqtt_command(
         self, lock: dict, nonce: str | None, host_pwd: str | None, *, unlock: bool
     ) -> bool:
@@ -1282,6 +1287,10 @@ def _register_services(hass: HomeAssistant, coordinator: LocklyCoordinator) -> N
             lock_id,
             door_open,
         )
+        hass.bus.async_fire("lockly_door_state_refreshed", {
+            "lock_id": lock_id,
+            "door_open": door_open,
+        })
 
     async def handle_enable_native_auto_lock(call) -> None:
         """Enable the lock's own close-door-immediately locking behavior."""
